@@ -1,0 +1,318 @@
+{
+  "title": "Hospital Medication Prescribing",
+  "description": "Doctors prescribe drugs with daily doses to patients on a hospital ward. The system enforces maximum doses and blocks prescriptions that conflict with allergies or other drugs the patient already takes.",
+  "requirements": [
+    { "id": "R1", "text": "A patient must be admitted to the ward before allergies or prescriptions can be recorded for them." },
+    { "id": "R2", "text": "A prescription consists of a drug and a daily dose in mg. A patient has at most one prescription per drug." },
+    { "id": "R3", "text": "Every drug has a maximum daily dose. No prescribed daily dose may exceed it." },
+    { "id": "R4", "text": "A patient must never be prescribed a drug they are allergic to." },
+    { "id": "R5", "text": "A patient must never be prescribed two drugs that interact with each other. A drug does not interact with itself, and interactions are mutual." },
+    { "id": "R6", "text": "Only licensed doctors may prescribe a drug, change its dose or discontinue it." },
+    { "id": "R7", "text": "When an allergy is recorded, any current prescription of that drug for the patient is discontinued immediately." },
+    { "id": "R8", "text": "The current prescriptions of an admitted patient can be viewed." },
+    { "id": "R9", "text": "A request that cannot be carried out leaves all records unchanged and reports the reason." }
+  ],
+  "givenSets": [
+    { "name": "PATIENT", "comment": "All possible patients." },
+    { "name": "DRUG", "comment": "All drugs in the hospital's formulary." },
+    { "name": "DOCTOR", "comment": "All possible doctors." }
+  ],
+  "freeTypes": [
+    {
+      "name": "REPORT",
+      "constructors": ["ok", "notLicensed", "unknownPatient", "patientExists", "alreadyPrescribed", "notPrescribed", "doseTooHigh", "allergyConflict", "interaction"],
+      "comment": "Outcome of a request.",
+      "requirements": ["R9"]
+    }
+  ],
+  "abbreviations": [],
+  "axiomaticDefinitions": [
+    {
+      "comment": "Fixed medical reference data.",
+      "declarations": [
+        { "name": "maxDose", "type": "DRUG → ℕ₁", "comment": "Maximum daily dose of each drug in mg.", "requirements": ["R3"] },
+        { "name": "interacts", "type": "DRUG ↔ DRUG", "comment": "Pairs of drugs that must not be taken together.", "requirements": ["R5"] },
+        { "name": "licensed", "type": "ℙ DOCTOR", "comment": "Doctors licensed to prescribe.", "requirements": ["R6"] }
+      ],
+      "predicates": [
+        { "formula": "∀ d : DRUG • (d ↦ d) ∉ interacts", "requirements": ["R5"] },
+        { "formula": "∀ d₁, d₂ : DRUG • (d₁ ↦ d₂) ∈ interacts ⇒ (d₂ ↦ d₁) ∈ interacts", "requirements": ["R5"] }
+      ]
+    }
+  ],
+  "schemas": [
+    {
+      "name": "Ward",
+      "kind": "state",
+      "declarations": [
+        { "name": "patients", "type": "ℙ PATIENT", "comment": "Patients currently admitted.", "requirements": ["R1"] },
+        { "name": "allergic", "type": "PATIENT ↔ DRUG", "comment": "Known allergies.", "requirements": ["R4"] },
+        { "name": "rx", "type": "PATIENT ⇸ (DRUG ⇸ ℕ₁)", "comment": "Current prescriptions: for each patient, the daily dose (in mg) of each prescribed drug. Being a function, it allows at most one dose per drug.", "requirements": ["R2"] }
+      ],
+      "predicates": [
+        { "formula": "dom allergic ⊆ patients", "requirements": ["R1"] },
+        { "formula": "dom rx = patients", "comment": "Every admitted patient has a (possibly empty) set of prescriptions.", "requirements": ["R1"] },
+        { "formula": "∀ p : patients; d : dom (rx p) • (rx p) d ≤ maxDose d", "comment": "No dose exceeds the maximum.", "requirements": ["R3"] },
+        { "formula": "∀ p : patients • dom (rx p) ∩ allergic⦇{p}⦈ = ∅", "comment": "No patient is prescribed a drug they are allergic to.", "requirements": ["R4"] },
+        { "formula": "∀ p : patients • (dom (rx p) × dom (rx p)) ∩ interacts = ∅", "comment": "No patient is prescribed two interacting drugs.", "requirements": ["R5"] }
+      ]
+    },
+    {
+      "name": "InitWard",
+      "kind": "init",
+      "declarations": [
+        { "include": "Ward'" }
+      ],
+      "predicates": [
+        { "formula": "patients' = ∅" },
+        { "formula": "allergic' = ∅" },
+        { "formula": "rx' = ∅" }
+      ]
+    },
+    {
+      "name": "Success",
+      "kind": "report",
+      "declarations": [
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r! = ok" }
+      ]
+    },
+    {
+      "name": "Admit",
+      "kind": "operation",
+      "requirements": ["R1"],
+      "declarations": [
+        { "include": "ΔWard" },
+        { "name": "p?", "type": "PATIENT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∉ patients" },
+        { "formula": "patients' = patients ∪ {p?}" },
+        { "formula": "rx' = rx ∪ {p? ↦ ∅}", "comment": "A newly admitted patient has no prescriptions." },
+        { "formula": "allergic' = allergic", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "RecordAllergy",
+      "kind": "operation",
+      "requirements": ["R4", "R7"],
+      "declarations": [
+        { "include": "ΔWard" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "drug?", "type": "DRUG" }
+      ],
+      "predicates": [
+        { "formula": "p? ∈ patients" },
+        { "formula": "allergic' = allergic ∪ {p? ↦ drug?}" },
+        { "formula": "rx' = rx ⊕ {p? ↦ {drug?} ⩤ rx p?}", "comment": "A current prescription of the drug is discontinued. Without this, the state invariant would forbid recording the allergy at all.", "requirements": ["R7"] },
+        { "formula": "patients' = patients", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "Prescribe",
+      "kind": "operation",
+      "requirements": ["R2", "R3", "R4", "R5", "R6"],
+      "declarations": [
+        { "include": "ΔWard" },
+        { "name": "doc?", "type": "DOCTOR" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "drug?", "type": "DRUG" },
+        { "name": "dose?", "type": "ℕ₁" }
+      ],
+      "predicates": [
+        { "formula": "doc? ∈ licensed", "requirements": ["R6"] },
+        { "formula": "p? ∈ patients", "requirements": ["R1"] },
+        { "formula": "drug? ∉ dom (rx p?)", "comment": "Use ChangeDose to change an existing prescription.", "requirements": ["R2"] },
+        { "formula": "dose? ≤ maxDose drug?", "requirements": ["R3"] },
+        { "formula": "drug? ∉ allergic⦇{p?}⦈", "requirements": ["R4"] },
+        { "formula": "∀ d : dom (rx p?) • (d ↦ drug?) ∉ interacts", "requirements": ["R5"] },
+        { "formula": "rx' = rx ⊕ {p? ↦ rx p? ∪ {drug? ↦ dose?}}" },
+        { "formula": "patients' = patients ∧ allergic' = allergic", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "ChangeDose",
+      "kind": "operation",
+      "comment": "Allergies and interactions need no check: the drug is already prescribed, so the state invariant already guarantees them.",
+      "requirements": ["R3", "R6"],
+      "declarations": [
+        { "include": "ΔWard" },
+        { "name": "doc?", "type": "DOCTOR" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "drug?", "type": "DRUG" },
+        { "name": "dose?", "type": "ℕ₁" }
+      ],
+      "predicates": [
+        { "formula": "doc? ∈ licensed", "requirements": ["R6"] },
+        { "formula": "p? ∈ patients" },
+        { "formula": "drug? ∈ dom (rx p?)" },
+        { "formula": "dose? ≤ maxDose drug?", "requirements": ["R3"] },
+        { "formula": "rx' = rx ⊕ {p? ↦ rx p? ⊕ {drug? ↦ dose?}}" },
+        { "formula": "patients' = patients ∧ allergic' = allergic", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "Discontinue",
+      "kind": "operation",
+      "requirements": ["R6"],
+      "declarations": [
+        { "include": "ΔWard" },
+        { "name": "doc?", "type": "DOCTOR" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "drug?", "type": "DRUG" }
+      ],
+      "predicates": [
+        { "formula": "doc? ∈ licensed", "requirements": ["R6"] },
+        { "formula": "p? ∈ patients" },
+        { "formula": "drug? ∈ dom (rx p?)" },
+        { "formula": "rx' = rx ⊕ {p? ↦ {drug?} ⩤ rx p?}" },
+        { "formula": "patients' = patients ∧ allergic' = allergic", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "ViewPrescriptions",
+      "kind": "operation",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "current!", "type": "DRUG ⇸ ℕ₁" }
+      ],
+      "predicates": [
+        { "formula": "p? ∈ patients" },
+        { "formula": "current! = rx p?" }
+      ]
+    },
+    {
+      "name": "NotLicensed",
+      "kind": "error",
+      "requirements": ["R6", "R9"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "doc?", "type": "DOCTOR" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "doc? ∉ licensed" },
+        { "formula": "r! = notLicensed" }
+      ]
+    },
+    {
+      "name": "UnknownPatient",
+      "kind": "error",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∉ patients" },
+        { "formula": "r! = unknownPatient" }
+      ]
+    },
+    {
+      "name": "PatientExists",
+      "kind": "error",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∈ patients" },
+        { "formula": "r! = patientExists" }
+      ]
+    },
+    {
+      "name": "AlreadyPrescribed",
+      "kind": "error",
+      "requirements": ["R2", "R9"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "drug?", "type": "DRUG" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∈ patients" },
+        { "formula": "drug? ∈ dom (rx p?)" },
+        { "formula": "r! = alreadyPrescribed" }
+      ]
+    },
+    {
+      "name": "NotPrescribed",
+      "kind": "error",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "drug?", "type": "DRUG" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∈ patients" },
+        { "formula": "drug? ∉ dom (rx p?)" },
+        { "formula": "r! = notPrescribed" }
+      ]
+    },
+    {
+      "name": "DoseTooHigh",
+      "kind": "error",
+      "requirements": ["R3", "R9"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "drug?", "type": "DRUG" },
+        { "name": "dose?", "type": "ℕ₁" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "dose? > maxDose drug?" },
+        { "formula": "r! = doseTooHigh" }
+      ]
+    },
+    {
+      "name": "Allergic",
+      "kind": "error",
+      "requirements": ["R4", "R9"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "drug?", "type": "DRUG" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∈ patients" },
+        { "formula": "drug? ∈ allergic⦇{p?}⦈" },
+        { "formula": "r! = allergyConflict" }
+      ]
+    },
+    {
+      "name": "Interaction",
+      "kind": "error",
+      "requirements": ["R5", "R9"],
+      "declarations": [
+        { "include": "ΞWard" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "drug?", "type": "DRUG" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∈ patients" },
+        { "formula": "∃ d : dom (rx p?) • (d ↦ drug?) ∈ interacts" },
+        { "formula": "r! = interaction" }
+      ]
+    }
+  ],
+  "schemaDefinitions": [
+    { "name": "AdmitTotal", "expression": "(Admit ∧ Success) ∨ PatientExists", "requirements": ["R1", "R9"] },
+    { "name": "RecordAllergyTotal", "expression": "(RecordAllergy ∧ Success) ∨ UnknownPatient", "requirements": ["R7", "R9"] },
+    { "name": "PrescribeTotal", "expression": "(Prescribe ∧ Success) ∨ NotLicensed ∨ UnknownPatient ∨ AlreadyPrescribed ∨ DoseTooHigh ∨ Allergic ∨ Interaction", "requirements": ["R2", "R3", "R4", "R5", "R6", "R9"] },
+    { "name": "ChangeDoseTotal", "expression": "(ChangeDose ∧ Success) ∨ NotLicensed ∨ UnknownPatient ∨ NotPrescribed ∨ DoseTooHigh", "requirements": ["R3", "R6", "R9"] },
+    { "name": "DiscontinueTotal", "expression": "(Discontinue ∧ Success) ∨ NotLicensed ∨ UnknownPatient ∨ NotPrescribed", "requirements": ["R6", "R9"] },
+    { "name": "ViewPrescriptionsTotal", "expression": "(ViewPrescriptions ∧ Success) ∨ UnknownPatient", "requirements": ["R8", "R9"] }
+  ]
+}

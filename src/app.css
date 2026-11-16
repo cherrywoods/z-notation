@@ -1,0 +1,161 @@
+/* Global tokens. Mostly white background + black text; colour only for Z symbols.
+   Z symbol colours: GitHub "Light Colorblind" syntax theme (Primer primitives). */
+
+:root {
+  color-scheme: light;
+
+  /* surfaces & text */
+  --bg: #ffffff;
+  --bg-subtle: #f6f8fa;
+  --bg-hover: #eff2f5;
+  --fg: #1f2328;
+  --fg-muted: #59636e;
+  --fg-faint: #818b98;
+  --border: #d1d9e0;
+  --border-strong: #1f2328;
+  --focus: #0969da;
+
+  /* Interface chrome (header, step row, controls, panels, help cards): a slightly
+     grey layer that recedes behind the black-on-white content but keeps high
+     contrast (--ui-fg ≈ 6.4:1 on white). */
+  --ui-fg: #59636e;
+  --ui-fg-strong: #3d444d;
+  --ui-fg-faint: #818b98;
+  --ui-bg: #f6f8fa;
+  --ui-border: #d8dee4;
+  --shadow-sm: 0 1px 2px rgba(31, 35, 40, 0.08);
+  --shadow-md: 0 4px 16px rgba(31, 35, 40, 0.12);
+  --shadow-lg: 0 12px 40px rgba(31, 35, 40, 0.18);
+
+  /* Z symbol categories (see src/lib/z/symbols.ts) */
+  --z-type: #0550ae; /* ℙ ℕ ℤ ×                      (syntax: constant) */
+  /* names of given sets (the types from the Types step): a quieter blue */
+  --z-given: #3a6aa3;
+  --z-relation: #8250df; /* ↔ ⇸ → ↦ dom ran ⊕ ⩤        (syntax: entity)   */
+  --z-set: #0a3069; /* ∈ ∉ ⊆ ∪ ∩ ∖ ∅ # { | }          (syntax: string)   */
+  --z-logic: currentColor; /* ∧ ∨ ¬ ⇒ ⇔ ∀ ∃ • = ≠ ≤: plain text colour (less colour) */
+  --z-schema: #bc4c00; /* Δ Ξ and the declaration ':'   (syntax: keyword)  */
+  --z-decoration: #953800; /* ′ ? !                    (syntax: variable) */
+
+  /* diffs & checks (colorblind theme: inserted = blue, deleted = orange) */
+  --diff-added-bg: #ddf4ff;
+  --diff-added-fg: #0550ae;
+  --diff-removed-bg: #fff1e5;
+  --diff-removed-fg: #762c00;
+  --diff-changed-bg: #ffd8b5;
+  --ok: #0550ae;
+  --bad: #bc4c00;
+  --error: #bc4c00;
+  --info: #0550ae;
+
+  /* type */
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-z: 'STIX Two Text', 'Noto Sans Math', 'Cambria Math', 'STIX Two Math', serif;
+  --font-z-symbols: 'Noto Sans Math', 'STIX Two Text', 'Cambria Math', serif;
+
+  /* layout */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+  --gutter: clamp(16px, 3vw, 40px);
+  --header-h: 52px;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ── Z text (static rendering and editors share these classes) ─────────────── */
+.z-text {
+  font-family: var(--font-z);
+  font-size: 1.12rem;
+  line-height: 1.6;
+}
+.z-ident {
+  font-style: normal;
+}
+.z-given {
+  font-style: normal;
+  color: var(--z-given);
+}
+.z-type {
+  color: var(--z-type);
+}
+.z-relation {
+  color: var(--z-relation);
+}
+.z-set {
+  color: var(--z-set);
+}
+.z-logic {
+  color: inherit;
+}
+.z-schema {
+  color: var(--z-schema);
+}
+.z-decoration {
+  color: var(--z-decoration);
+}
+.z-keyword {
+  font-style: normal;
+  font-family: var(--font-z);
+}
+.z-number {
+  font-style: normal;
+}
+.z-error {
+  text-decoration: underline wavy var(--error);
+}
+/* symbols with an explainer: help cursor (set by the editor/renderer via [data-explain]) */
+[data-explain] {
+  cursor: help;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  :root {
+    --shadow-sm: none;
+    --shadow-md: none;
+    --shadow-lg: none;
+  }
+}

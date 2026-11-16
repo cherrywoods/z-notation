@@ -1,0 +1,127 @@
+{
+  "id": "railway-interlocking",
+  "title": "Railway Signalling",
+  "short": "Railway Signalling",
+  "icon": "train-front",
+  "description": "Signals protect the blocks of a railway line from collisions.",
+  "requirements": [
+    { "id": "R1", "text": "At most one train may be in a block at any time." },
+    { "id": "R2", "text": "Each signal protects the entry into one block and shows either red or green." },
+    { "id": "R3", "text": "A signal may only show green if the block it protects is free." },
+    { "id": "R4", "text": "Of the signals protecting the same block, at most one may show green." },
+    { "id": "R5", "text": "Initially, there are no trains on the line and all signals show red." },
+    { "id": "R6", "text": "The signaller can look up the block a train is in." },
+    { "id": "R7", "text": "The signaller can set a signal to green." }
+  ],
+  "givenSets": [
+    { "name": "TRAIN", "values": ["ICE5", "IC60", "RE7", "RB12", "IRE1", "RB31", "EC8", "ICE23"], "infinite": true },
+    { "name": "BLOCK", "values": ["B1", "B2", "B3", "B4", "B5", "B6"] },
+    { "name": "SIGNAL", "values": ["S1", "S2", "S3", "S4", "S5", "S6"] }
+  ],
+  "fixedValues": { "protects": "{S1 ↦ B2, S2 ↦ B3, S3 ↦ B4, S4 ↦ B3, S5 ↦ B2, S6 ↦ B1}" },
+  "state": {
+    "name": "Interlocking",
+    "prompt": "A signal may only show green if the block it protects is free.",
+    "declarations": [
+      { "text": "at : TRAIN ⇸ BLOCK", "requirements": ["R1"] },
+      { "text": "protects : SIGNAL → BLOCK", "requirements": ["R2"] },
+      { "text": "green : ℙ SIGNAL", "requirements": ["R2"] }
+    ],
+    "predicates": [
+      { "text": "∀ t₁, t₂ : dom at • at(t₁) = at(t₂) ⇒ t₁ = t₂", "requirements": ["R1"] },
+      { "text": "∀ s : green • protects(s) ∉ ran at", "requirements": ["R3"], "hidden": true },
+      { "text": "∀ s₁, s₂ : green • protects(s₁) = protects(s₂) ⇒ s₁ = s₂", "requirements": ["R4"] }
+    ]
+  },
+  "init": {
+    "name": "InitInterlocking",
+    "prompt": "At the start, all signals show red.",
+    "declarations": [
+      { "text": "Interlocking", "requirements": [] }
+    ],
+    "predicates": [
+      { "text": "at = ∅", "requirements": ["R5"] },
+      { "text": "green = ∅", "requirements": ["R5"], "hidden": true }
+    ]
+  },
+  "operations": [
+    {
+      "name": "LocateTrain",
+      "kind": "query",
+      "prompt": "Output the block the train is in.",
+      "declarations": [
+        { "text": "ΞInterlocking", "requirements": [] },
+        { "text": "t? : TRAIN", "requirements": ["R6"] },
+        { "text": "b! : BLOCK", "requirements": ["R6"] }
+      ],
+      "predicates": [
+        { "text": "t? ∈ dom at", "requirements": ["R6"] },
+        { "text": "b! = at(t?)", "requirements": ["R6"], "hidden": true }
+      ]
+    },
+    {
+      "name": "ClearSignal",
+      "kind": "update",
+      "prompt": "Turn the signal green, but only if the block it protects is free.",
+      "declarations": [
+        { "text": "ΔInterlocking", "requirements": [] },
+        { "text": "s? : SIGNAL", "requirements": ["R7"] }
+      ],
+      "predicates": [
+        { "text": "protects(s?) ∉ ran at", "requirements": ["R3"], "hidden": true },
+        { "text": "∀ g : green • protects(g) ≠ protects(s?)", "requirements": ["R4"] },
+        { "text": "green′ = green ∪ {s?}", "requirements": ["R7"], "hidden": true },
+        { "text": "at′ = at", "requirements": [] },
+        { "text": "protects′ = protects", "requirements": [] }
+      ]
+    }
+  ],
+  "extraOperations": [
+    {
+      "name": "SetRed",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔInterlocking", "requirements": [] },
+        { "text": "s? : SIGNAL", "requirements": ["R2"] }
+      ],
+      "predicates": [
+        { "text": "green′ = green ∖ {s?}", "requirements": ["R2"] },
+        { "text": "at′ = at", "requirements": [] },
+        { "text": "protects′ = protects", "requirements": [] }
+      ]
+    },
+    {
+      "name": "PassSignal",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔInterlocking", "requirements": [] },
+        { "text": "t? : TRAIN", "requirements": [] },
+        { "text": "s? : SIGNAL", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "t? ∈ dom at", "requirements": [] },
+        { "text": "s? ∈ green", "requirements": [] },
+        { "text": "at′ = (at ∖ {t? ↦ at(t?)}) ∪ {t? ↦ protects(s?)}", "requirements": ["R1"] },
+        { "text": "green′ = green ∖ {s?}", "requirements": ["R3"] },
+        { "text": "protects′ = protects", "requirements": [] }
+      ]
+    },
+    {
+      "name": "EnterLine",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔInterlocking", "requirements": [] },
+        { "text": "t? : TRAIN", "requirements": [] },
+        { "text": "b? : BLOCK", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "t? ∉ dom at", "requirements": [] },
+        { "text": "b? ∉ ran at", "requirements": ["R1"] },
+        { "text": "∀ s : green • protects(s) ≠ b?", "requirements": ["R3"] },
+        { "text": "at′ = at ∪ {t? ↦ b?}", "requirements": [] },
+        { "text": "green′ = green", "requirements": [] },
+        { "text": "protects′ = protects", "requirements": [] }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,267 @@
+{
+  "title": "Bank Accounts with Overdraft Limits",
+  "description": "A bank keeps accounts for customers. Each account has a balance and an overdraft limit. Customers deposit, withdraw and transfer money; accounts are opened and closed.",
+  "requirements": [
+    { "id": "R1", "text": "Each account belongs to exactly one customer." },
+    { "id": "R2", "text": "Each account has a balance and a non-negative overdraft limit, which is fixed when the account is opened." },
+    { "id": "R3", "text": "The balance of an account must never fall below the negative of its overdraft limit." },
+    { "id": "R4", "text": "A customer can open a new account with a given overdraft limit. A new account has balance 0." },
+    { "id": "R5", "text": "A positive amount can be deposited into an existing account." },
+    { "id": "R6", "text": "A positive amount can be withdrawn from an existing account, as long as R3 still holds afterwards." },
+    { "id": "R7", "text": "A positive amount can be transferred between two different existing accounts, as long as R3 still holds for the source account. A transfer neither creates nor destroys money." },
+    { "id": "R8", "text": "The balance of an existing account can be queried." },
+    { "id": "R9", "text": "An account can only be closed if its balance is 0." },
+    { "id": "R10", "text": "A request that cannot be carried out leaves all accounts unchanged and reports the reason." }
+  ],
+  "givenSets": [
+    { "name": "ACCOUNT", "comment": "All possible account numbers." },
+    { "name": "CUSTOMER", "comment": "All possible customers." }
+  ],
+  "freeTypes": [
+    {
+      "name": "REPORT",
+      "constructors": ["ok", "unknownAccount", "insufficientFunds", "sameAccount", "balanceNotZero"],
+      "comment": "Outcome of a request.",
+      "requirements": ["R10"]
+    }
+  ],
+  "abbreviations": [],
+  "axiomaticDefinitions": [],
+  "schemas": [
+    {
+      "name": "Bank",
+      "kind": "state",
+      "comment": "The accounts currently open at the bank.",
+      "declarations": [
+        { "name": "owner", "type": "ACCOUNT ⇸ CUSTOMER", "comment": "Owner of each open account.", "requirements": ["R1"] },
+        { "name": "balance", "type": "ACCOUNT ⇸ ℤ", "comment": "Current balance in cents.", "requirements": ["R2"] },
+        { "name": "overdraft", "type": "ACCOUNT ⇸ ℕ", "comment": "Overdraft limit in cents.", "requirements": ["R2"] }
+      ],
+      "predicates": [
+        { "formula": "dom balance = dom owner", "comment": "Every open account has an owner and a balance.", "requirements": ["R1", "R2"] },
+        { "formula": "dom overdraft = dom owner", "comment": "Every open account has an overdraft limit.", "requirements": ["R2"] },
+        { "formula": "∀ a : dom balance • balance a ≥ −(overdraft a)", "comment": "No account is overdrawn beyond its limit.", "requirements": ["R3"] }
+      ]
+    },
+    {
+      "name": "InitBank",
+      "kind": "init",
+      "comment": "Initially no accounts are open.",
+      "declarations": [
+        { "include": "Bank'" }
+      ],
+      "predicates": [
+        { "formula": "owner' = ∅" },
+        { "formula": "balance' = ∅" },
+        { "formula": "overdraft' = ∅" }
+      ]
+    },
+    {
+      "name": "Success",
+      "kind": "report",
+      "comment": "Reports that a request was carried out.",
+      "declarations": [
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r! = ok" }
+      ]
+    },
+    {
+      "name": "OpenAccount",
+      "kind": "operation",
+      "comment": "Opens a new account. The bank picks any unused account number.",
+      "requirements": ["R4"],
+      "declarations": [
+        { "include": "ΔBank" },
+        { "name": "c?", "type": "CUSTOMER" },
+        { "name": "limit?", "type": "ℕ" },
+        { "name": "a!", "type": "ACCOUNT" }
+      ],
+      "predicates": [
+        { "formula": "a! ∉ dom owner", "comment": "The new account number is not in use. Since ACCOUNT is not bounded, such a number always exists." },
+        { "formula": "owner' = owner ∪ {a! ↦ c?}" },
+        { "formula": "balance' = balance ∪ {a! ↦ 0}" },
+        { "formula": "overdraft' = overdraft ∪ {a! ↦ limit?}" }
+      ]
+    },
+    {
+      "name": "Deposit",
+      "kind": "operation",
+      "requirements": ["R5"],
+      "declarations": [
+        { "include": "ΔBank" },
+        { "name": "a?", "type": "ACCOUNT" },
+        { "name": "amount?", "type": "ℕ₁" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom balance" },
+        { "formula": "balance' = balance ⊕ {a? ↦ balance a? + amount?}" },
+        { "formula": "owner' = owner ∧ overdraft' = overdraft", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "Withdraw",
+      "kind": "operation",
+      "requirements": ["R6"],
+      "declarations": [
+        { "include": "ΔBank" },
+        { "name": "a?", "type": "ACCOUNT" },
+        { "name": "amount?", "type": "ℕ₁" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom balance" },
+        { "formula": "balance a? − amount? ≥ −(overdraft a?)", "comment": "The withdrawal stays within the overdraft limit.", "requirements": ["R3"] },
+        { "formula": "balance' = balance ⊕ {a? ↦ balance a? − amount?}" },
+        { "formula": "owner' = owner ∧ overdraft' = overdraft", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "Transfer",
+      "kind": "operation",
+      "requirements": ["R7"],
+      "declarations": [
+        { "include": "ΔBank" },
+        { "name": "from?", "type": "ACCOUNT" },
+        { "name": "to?", "type": "ACCOUNT" },
+        { "name": "amount?", "type": "ℕ₁" }
+      ],
+      "predicates": [
+        { "formula": "from? ∈ dom balance ∧ to? ∈ dom balance" },
+        { "formula": "from? ≠ to?", "comment": "Without this, the override below would contain two pairs for the same account and would not be a function." },
+        { "formula": "balance from? − amount? ≥ −(overdraft from?)", "requirements": ["R3"] },
+        { "formula": "balance' = balance ⊕ {from? ↦ balance from? − amount?, to? ↦ balance to? + amount?}", "comment": "Exactly amount? leaves from? and arrives at to?; all other balances are unchanged, so no money is created or destroyed." },
+        { "formula": "owner' = owner ∧ overdraft' = overdraft", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "BalanceEnquiry",
+      "kind": "operation",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΞBank" },
+        { "name": "a?", "type": "ACCOUNT" },
+        { "name": "b!", "type": "ℤ" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom balance" },
+        { "formula": "b! = balance a?" }
+      ]
+    },
+    {
+      "name": "CloseAccount",
+      "kind": "operation",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "ΔBank" },
+        { "name": "a?", "type": "ACCOUNT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom balance" },
+        { "formula": "balance a? = 0" },
+        { "formula": "owner' = {a?} ⩤ owner" },
+        { "formula": "balance' = {a?} ⩤ balance" },
+        { "formula": "overdraft' = {a?} ⩤ overdraft" }
+      ]
+    },
+    {
+      "name": "UnknownAccount",
+      "kind": "error",
+      "requirements": ["R10"],
+      "declarations": [
+        { "include": "ΞBank" },
+        { "name": "a?", "type": "ACCOUNT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∉ dom balance" },
+        { "formula": "r! = unknownAccount" }
+      ]
+    },
+    {
+      "name": "InsufficientFunds",
+      "kind": "error",
+      "requirements": ["R10"],
+      "declarations": [
+        { "include": "ΞBank" },
+        { "name": "a?", "type": "ACCOUNT" },
+        { "name": "amount?", "type": "ℕ₁" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom balance" },
+        { "formula": "balance a? − amount? < −(overdraft a?)" },
+        { "formula": "r! = insufficientFunds" }
+      ]
+    },
+    {
+      "name": "BalanceNotZero",
+      "kind": "error",
+      "requirements": ["R10"],
+      "declarations": [
+        { "include": "ΞBank" },
+        { "name": "a?", "type": "ACCOUNT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom balance" },
+        { "formula": "balance a? ≠ 0" },
+        { "formula": "r! = balanceNotZero" }
+      ]
+    },
+    {
+      "name": "UnknownTransferAccount",
+      "kind": "error",
+      "requirements": ["R10"],
+      "declarations": [
+        { "include": "ΞBank" },
+        { "name": "from?", "type": "ACCOUNT" },
+        { "name": "to?", "type": "ACCOUNT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "from? ∉ dom balance ∨ to? ∉ dom balance" },
+        { "formula": "r! = unknownAccount" }
+      ]
+    },
+    {
+      "name": "SameAccount",
+      "kind": "error",
+      "requirements": ["R10"],
+      "declarations": [
+        { "include": "ΞBank" },
+        { "name": "from?", "type": "ACCOUNT" },
+        { "name": "to?", "type": "ACCOUNT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "from? = to?" },
+        { "formula": "r! = sameAccount" }
+      ]
+    },
+    {
+      "name": "TransferInsufficientFunds",
+      "kind": "error",
+      "requirements": ["R10"],
+      "declarations": [
+        { "include": "ΞBank" },
+        { "name": "from?", "type": "ACCOUNT" },
+        { "name": "amount?", "type": "ℕ₁" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "from? ∈ dom balance" },
+        { "formula": "balance from? − amount? < −(overdraft from?)" },
+        { "formula": "r! = insufficientFunds" }
+      ]
+    }
+  ],
+  "schemaDefinitions": [
+    { "name": "OpenAccountTotal", "expression": "OpenAccount ∧ Success", "comment": "Opening an account always succeeds." },
+    { "name": "DepositTotal", "expression": "(Deposit ∧ Success) ∨ UnknownAccount", "requirements": ["R5", "R10"] },
+    { "name": "WithdrawTotal", "expression": "(Withdraw ∧ Success) ∨ UnknownAccount ∨ InsufficientFunds", "requirements": ["R6", "R10"] },
+    { "name": "TransferTotal", "expression": "(Transfer ∧ Success) ∨ UnknownTransferAccount ∨ SameAccount ∨ TransferInsufficientFunds", "comment": "If several errors apply at once, any of the matching reports may be given.", "requirements": ["R7", "R10"] },
+    { "name": "BalanceEnquiryTotal", "expression": "(BalanceEnquiry ∧ Success) ∨ UnknownAccount", "requirements": ["R8", "R10"] },
+    { "name": "CloseAccountTotal", "expression": "(CloseAccount ∧ Success) ∨ UnknownAccount ∨ BalanceNotZero", "requirements": ["R9", "R10"] }
+  ]
+}

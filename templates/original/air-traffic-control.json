@@ -1,0 +1,471 @@
+{
+  "title": "Air Traffic Control: Sectors and Runways",
+  "description": "The airspace is divided into sectors, each worked by controllers. Aircraft are handed over between controllers. Tower controllers issue landing clearances and let departing aircraft line up on runways.",
+  "requirements": [
+    { "id": "R1", "text": "Every aircraft tracked by the system is in exactly one sector and is controlled by exactly one controller at any time." },
+    { "id": "R2", "text": "An aircraft's controller must be on duty in the aircraft's sector." },
+    { "id": "R3", "text": "Controllers sign on to work one sector. A controller may only sign off once no aircraft is under their control." },
+    { "id": "R4", "text": "An aircraft enters the system when a controller on duty accepts it into that controller's sector." },
+    { "id": "R5", "text": "An aircraft is handed over to another controller in a single step: its sector and its controller change together. Aircraft that hold a landing clearance or are on a runway cannot be handed over." },
+    { "id": "R6", "text": "Each runway belongs to a tower sector. At most one aircraft occupies a runway at any time, and it is in the runway's tower sector." },
+    { "id": "R7", "text": "A landing clearance for a runway may only be issued by the aircraft's own controller, while the aircraft is in the runway's tower sector and the runway is free." },
+    { "id": "R8", "text": "At most one aircraft holds a landing clearance for a runway, and an aircraft holds at most one landing clearance." },
+    { "id": "R9", "text": "A landing clearance can be cancelled at any time (e.g. for a go-around)." },
+    { "id": "R10", "text": "When a cleared aircraft touches down, it occupies the runway and its clearance ends. After vacating the runway, a landed aircraft leaves the system (ground control is out of scope)." },
+    { "id": "R11", "text": "A departing aircraft enters the system by lining up on a runway, with the permission of a controller on duty in the runway's tower sector. The runway must be free and nobody may be cleared to land on it. After takeoff, the aircraft remains under that controller's control." },
+    { "id": "R12", "text": "A request that cannot be carried out leaves the system unchanged and reports the reason." }
+  ],
+  "givenSets": [
+    { "name": "AIRCRAFT", "comment": "All possible aircraft (identified by call sign)." },
+    { "name": "CONTROLLER", "comment": "All possible air traffic controllers." },
+    { "name": "SECTOR", "comment": "The sectors of the airspace." },
+    { "name": "RUNWAY", "comment": "The runways of the airport." }
+  ],
+  "freeTypes": [
+    {
+      "name": "REPORT",
+      "constructors": ["ok", "alreadyOnDuty", "notOnDuty", "stillControlling", "alreadyTracked", "notTracked", "sameController", "notYourAircraft", "wrongSector", "wrongTowerController", "alreadyCleared", "aircraftOnRunway", "runwayOccupied", "runwayReserved", "noClearance"],
+      "comment": "Outcome of a request.",
+      "requirements": ["R12"]
+    }
+  ],
+  "abbreviations": [],
+  "axiomaticDefinitions": [
+    {
+      "comment": "The fixed airport layout.",
+      "declarations": [
+        { "name": "runwaySector", "type": "RUNWAY → SECTOR", "comment": "The tower sector each runway belongs to.", "requirements": ["R6"] }
+      ],
+      "predicates": []
+    }
+  ],
+  "schemas": [
+    {
+      "name": "AirTraffic",
+      "kind": "state",
+      "declarations": [
+        { "name": "sectorOf", "type": "AIRCRAFT ⇸ SECTOR", "comment": "The sector each tracked aircraft is in.", "requirements": ["R1"] },
+        { "name": "control", "type": "AIRCRAFT ⇸ CONTROLLER", "comment": "The controller of each tracked aircraft. Since this is a function, an aircraft has at most one controller.", "requirements": ["R1"] },
+        { "name": "onDuty", "type": "CONTROLLER ⇸ SECTOR", "comment": "The sector each controller on duty works.", "requirements": ["R3"] },
+        { "name": "onRunway", "type": "RUNWAY ⤔ AIRCRAFT", "comment": "The aircraft occupying each occupied runway. Being a function, a runway holds at most one aircraft; being injective, an aircraft is on at most one runway.", "requirements": ["R6"] },
+        { "name": "landing", "type": "AIRCRAFT ⤔ RUNWAY", "comment": "Landing clearances. Being an injective function, each aircraft is cleared for at most one runway and each runway for at most one aircraft.", "requirements": ["R8"] }
+      ],
+      "predicates": [
+        { "formula": "dom control = dom sectorOf", "comment": "Every tracked aircraft has a controller.", "requirements": ["R1"] },
+        { "formula": "∀ a : dom control • control a ∈ dom onDuty ∧ onDuty (control a) = sectorOf a", "comment": "Every aircraft is controlled by a controller on duty in its sector.", "requirements": ["R2"] },
+        { "formula": "ran onRunway ⊆ dom sectorOf", "comment": "Aircraft on runways are tracked.", "requirements": ["R6"] },
+        { "formula": "∀ r : dom onRunway • sectorOf (onRunway r) = runwaySector r", "comment": "An aircraft on a runway is in the runway's tower sector.", "requirements": ["R6"] },
+        { "formula": "dom landing ⊆ dom sectorOf", "comment": "Only tracked aircraft hold landing clearances.", "requirements": ["R7"] },
+        { "formula": "∀ a : dom landing • sectorOf a = runwaySector (landing a)", "comment": "A cleared aircraft is in the tower sector of its runway.", "requirements": ["R7"] },
+        { "formula": "ran landing ∩ dom onRunway = ∅", "comment": "No landing clearance for an occupied runway.", "requirements": ["R7", "R11"] },
+        { "formula": "dom landing ∩ ran onRunway = ∅", "comment": "An aircraft on a runway holds no landing clearance.", "requirements": ["R10"] }
+      ]
+    },
+    {
+      "name": "InitAirTraffic",
+      "kind": "init",
+      "declarations": [
+        { "include": "AirTraffic'" }
+      ],
+      "predicates": [
+        { "formula": "sectorOf' = ∅ ∧ control' = ∅ ∧ onDuty' = ∅" },
+        { "formula": "onRunway' = ∅ ∧ landing' = ∅" }
+      ]
+    },
+    {
+      "name": "Success",
+      "kind": "report",
+      "declarations": [
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r! = ok" }
+      ]
+    },
+    {
+      "name": "SignOn",
+      "kind": "operation",
+      "requirements": ["R3"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "s?", "type": "SECTOR" }
+      ],
+      "predicates": [
+        { "formula": "c? ∉ dom onDuty" },
+        { "formula": "onDuty' = onDuty ∪ {c? ↦ s?}" },
+        { "formula": "sectorOf' = sectorOf ∧ control' = control ∧ onRunway' = onRunway ∧ landing' = landing", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "SignOff",
+      "kind": "operation",
+      "requirements": ["R3"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "c?", "type": "CONTROLLER" }
+      ],
+      "predicates": [
+        { "formula": "c? ∈ dom onDuty" },
+        { "formula": "c? ∉ ran control", "comment": "All aircraft have been handed over.", "requirements": ["R3"] },
+        { "formula": "onDuty' = {c?} ⩤ onDuty" },
+        { "formula": "sectorOf' = sectorOf ∧ control' = control ∧ onRunway' = onRunway ∧ landing' = landing", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "EnterAirspace",
+      "kind": "operation",
+      "requirements": ["R4"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "c?", "type": "CONTROLLER" }
+      ],
+      "predicates": [
+        { "formula": "a? ∉ dom sectorOf" },
+        { "formula": "c? ∈ dom onDuty" },
+        { "formula": "sectorOf' = sectorOf ∪ {a? ↦ onDuty c?}" },
+        { "formula": "control' = control ∪ {a? ↦ c?}" },
+        { "formula": "onDuty' = onDuty ∧ onRunway' = onRunway ∧ landing' = landing", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "Handover",
+      "kind": "operation",
+      "comment": "Sector and controller change in one operation. Two separate operations would violate R2 in the intermediate state.",
+      "requirements": ["R5"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "c?", "type": "CONTROLLER" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom sectorOf" },
+        { "formula": "c? ∈ dom onDuty" },
+        { "formula": "control a? ≠ c?" },
+        { "formula": "a? ∉ dom landing ∧ a? ∉ ran onRunway", "requirements": ["R5"] },
+        { "formula": "sectorOf' = sectorOf ⊕ {a? ↦ onDuty c?}" },
+        { "formula": "control' = control ⊕ {a? ↦ c?}" },
+        { "formula": "onDuty' = onDuty ∧ onRunway' = onRunway ∧ landing' = landing", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "ClearToLand",
+      "kind": "operation",
+      "requirements": ["R7", "R8"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "r?", "type": "RUNWAY" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom control" },
+        { "formula": "control a? = c?", "requirements": ["R7"] },
+        { "formula": "sectorOf a? = runwaySector r?", "requirements": ["R7"] },
+        { "formula": "a? ∉ dom landing ∧ a? ∉ ran onRunway", "requirements": ["R8"] },
+        { "formula": "r? ∉ ran landing", "requirements": ["R8"] },
+        { "formula": "r? ∉ dom onRunway", "requirements": ["R7"] },
+        { "formula": "landing' = landing ∪ {a? ↦ r?}" },
+        { "formula": "sectorOf' = sectorOf ∧ control' = control ∧ onDuty' = onDuty ∧ onRunway' = onRunway", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "CancelLanding",
+      "kind": "operation",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom landing" },
+        { "formula": "landing' = {a?} ⩤ landing" },
+        { "formula": "sectorOf' = sectorOf ∧ control' = control ∧ onDuty' = onDuty ∧ onRunway' = onRunway", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "Touchdown",
+      "kind": "event",
+      "comment": "Reported by surveillance. The state invariant guarantees that the runway is free.",
+      "requirements": ["R10"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom landing" },
+        { "formula": "onRunway' = onRunway ∪ {landing a? ↦ a?}" },
+        { "formula": "landing' = {a?} ⩤ landing" },
+        { "formula": "sectorOf' = sectorOf ∧ control' = control ∧ onDuty' = onDuty", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "VacateRunway",
+      "kind": "event",
+      "comment": "A landed aircraft taxis off the runway and is handed to ground control.",
+      "requirements": ["R10"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "r?", "type": "RUNWAY" }
+      ],
+      "predicates": [
+        { "formula": "r? ∈ dom onRunway" },
+        { "formula": "onRunway' = {r?} ⩤ onRunway" },
+        { "formula": "sectorOf' = {onRunway r?} ⩤ sectorOf" },
+        { "formula": "control' = {onRunway r?} ⩤ control" },
+        { "formula": "onDuty' = onDuty ∧ landing' = landing", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "LineUp",
+      "kind": "operation",
+      "requirements": ["R11"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "r?", "type": "RUNWAY" }
+      ],
+      "predicates": [
+        { "formula": "a? ∉ dom sectorOf", "comment": "The aircraft comes from ground control." },
+        { "formula": "c? ∈ dom onDuty" },
+        { "formula": "onDuty c? = runwaySector r?" },
+        { "formula": "r? ∉ dom onRunway" },
+        { "formula": "r? ∉ ran landing" },
+        { "formula": "onRunway' = onRunway ∪ {r? ↦ a?}" },
+        { "formula": "sectorOf' = sectorOf ∪ {a? ↦ runwaySector r?}" },
+        { "formula": "control' = control ∪ {a? ↦ c?}" },
+        { "formula": "onDuty' = onDuty ∧ landing' = landing", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "Takeoff",
+      "kind": "event",
+      "comment": "The aircraft leaves the runway and stays with the tower controller until it is handed over.",
+      "requirements": ["R11"],
+      "declarations": [
+        { "include": "ΔAirTraffic" },
+        { "name": "r?", "type": "RUNWAY" }
+      ],
+      "predicates": [
+        { "formula": "r? ∈ dom onRunway" },
+        { "formula": "onRunway' = {r?} ⩤ onRunway" },
+        { "formula": "sectorOf' = sectorOf ∧ control' = control ∧ onDuty' = onDuty ∧ landing' = landing", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "AlreadyOnDuty",
+      "kind": "error",
+      "requirements": ["R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "c? ∈ dom onDuty" },
+        { "formula": "r! = alreadyOnDuty" }
+      ]
+    },
+    {
+      "name": "NotOnDuty",
+      "kind": "error",
+      "requirements": ["R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "c? ∉ dom onDuty" },
+        { "formula": "r! = notOnDuty" }
+      ]
+    },
+    {
+      "name": "StillControlling",
+      "kind": "error",
+      "requirements": ["R3", "R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "c? ∈ ran control" },
+        { "formula": "r! = stillControlling" }
+      ]
+    },
+    {
+      "name": "AlreadyTracked",
+      "kind": "error",
+      "requirements": ["R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom sectorOf" },
+        { "formula": "r! = alreadyTracked" }
+      ]
+    },
+    {
+      "name": "NotTracked",
+      "kind": "error",
+      "requirements": ["R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∉ dom sectorOf" },
+        { "formula": "r! = notTracked" }
+      ]
+    },
+    {
+      "name": "SameController",
+      "kind": "error",
+      "requirements": ["R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom control" },
+        { "formula": "control a? = c?" },
+        { "formula": "r! = sameController" }
+      ]
+    },
+    {
+      "name": "NotYourAircraft",
+      "kind": "error",
+      "requirements": ["R7", "R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom control" },
+        { "formula": "control a? ≠ c?" },
+        { "formula": "r! = notYourAircraft" }
+      ]
+    },
+    {
+      "name": "WrongSector",
+      "kind": "error",
+      "requirements": ["R7", "R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "r?", "type": "RUNWAY" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom sectorOf" },
+        { "formula": "sectorOf a? ≠ runwaySector r?" },
+        { "formula": "r! = wrongSector" }
+      ]
+    },
+    {
+      "name": "WrongTowerController",
+      "kind": "error",
+      "requirements": ["R11", "R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "c?", "type": "CONTROLLER" },
+        { "name": "r?", "type": "RUNWAY" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "c? ∈ dom onDuty" },
+        { "formula": "onDuty c? ≠ runwaySector r?" },
+        { "formula": "r! = wrongTowerController" }
+      ]
+    },
+    {
+      "name": "AlreadyCleared",
+      "kind": "error",
+      "requirements": ["R5", "R8", "R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ dom landing" },
+        { "formula": "r! = alreadyCleared" }
+      ]
+    },
+    {
+      "name": "OnRunway",
+      "kind": "error",
+      "requirements": ["R5", "R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∈ ran onRunway" },
+        { "formula": "r! = aircraftOnRunway" }
+      ]
+    },
+    {
+      "name": "RunwayOccupied",
+      "kind": "error",
+      "requirements": ["R6", "R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "r?", "type": "RUNWAY" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r? ∈ dom onRunway" },
+        { "formula": "r! = runwayOccupied" }
+      ]
+    },
+    {
+      "name": "RunwayReserved",
+      "kind": "error",
+      "requirements": ["R8", "R11", "R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "r?", "type": "RUNWAY" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r? ∈ ran landing" },
+        { "formula": "r! = runwayReserved" }
+      ]
+    },
+    {
+      "name": "NoClearance",
+      "kind": "error",
+      "requirements": ["R12"],
+      "declarations": [
+        { "include": "ΞAirTraffic" },
+        { "name": "a?", "type": "AIRCRAFT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "a? ∉ dom landing" },
+        { "formula": "r! = noClearance" }
+      ]
+    }
+  ],
+  "schemaDefinitions": [
+    { "name": "SignOnTotal", "expression": "(SignOn ∧ Success) ∨ AlreadyOnDuty", "requirements": ["R3", "R12"] },
+    { "name": "SignOffTotal", "expression": "(SignOff ∧ Success) ∨ NotOnDuty ∨ StillControlling", "requirements": ["R3", "R12"] },
+    { "name": "EnterAirspaceTotal", "expression": "(EnterAirspace ∧ Success) ∨ AlreadyTracked ∨ NotOnDuty", "requirements": ["R4", "R12"] },
+    { "name": "HandoverTotal", "expression": "(Handover ∧ Success) ∨ NotTracked ∨ NotOnDuty ∨ SameController ∨ AlreadyCleared ∨ OnRunway", "requirements": ["R5", "R12"] },
+    { "name": "ClearToLandTotal", "expression": "(ClearToLand ∧ Success) ∨ NotTracked ∨ NotYourAircraft ∨ WrongSector ∨ AlreadyCleared ∨ OnRunway ∨ RunwayOccupied ∨ RunwayReserved", "requirements": ["R7", "R8", "R12"] },
+    { "name": "CancelLandingTotal", "expression": "(CancelLanding ∧ Success) ∨ NoClearance", "requirements": ["R9", "R12"] },
+    { "name": "LineUpTotal", "expression": "(LineUp ∧ Success) ∨ AlreadyTracked ∨ NotOnDuty ∨ WrongTowerController ∨ RunwayOccupied ∨ RunwayReserved", "requirements": ["R11", "R12"] }
+  ]
+}

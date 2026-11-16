@@ -1,0 +1,148 @@
+{
+  "id": "access-control",
+  "title": "Role-Based Access Control",
+  "short": "Role-Based Access Control",
+  "icon": "key-round",
+  "description": "Users hold roles, roles grant permissions, and some roles conflict.",
+  "requirements": [
+    { "id": "R1", "text": "Only registered users can hold roles." },
+    { "id": "R2", "text": "A user can hold several roles, and a role can grant several permissions." },
+    { "id": "R3", "text": "A role never conflicts with itself, and conflicts between roles are mutual." },
+    { "id": "R4", "text": "No user may hold two conflicting roles (separation of duty)." },
+    { "id": "R5", "text": "Initially, no users are registered." },
+    {
+      "id": "R6",
+      "text": "An administrator can list a registered user's permissions: those granted by any of the user's roles."
+    },
+    { "id": "R7", "text": "An administrator can assign a role to a registered user." }
+  ],
+  "givenSets": [
+    { "name": "USER", "values": ["alice", "bob", "carol", "dave", "erin", "frank", "grace", "heidi"], "infinite": true },
+    { "name": "ROLE", "values": ["clerk", "approver", "auditor", "admin", "developer", "operator"] },
+    {
+      "name": "PERMISSION",
+      "values": ["createPayment", "approvePayment", "readLedger", "editUsers", "deployCode", "readLogs"]
+    }
+  ],
+  "fixedValues": {
+    "conflicts": "{clerk ↦ approver, approver ↦ clerk, developer ↦ operator, operator ↦ developer}",
+    "grants": "{clerk ↦ createPayment, approver ↦ approvePayment, auditor ↦ readLedger, auditor ↦ readLogs, admin ↦ editUsers, developer ↦ readLogs, operator ↦ deployCode}"
+  },
+  "state": {
+    "name": "AccessControl",
+    "prompt": "Nobody may hold two conflicting roles.",
+    "declarations": [
+      { "text": "users : ℙ USER", "requirements": ["R1"] },
+      { "text": "holds : USER ↔ ROLE", "requirements": ["R2"] },
+      { "text": "grants : ROLE ↔ PERMISSION", "requirements": ["R2"] },
+      { "text": "conflicts : ROLE ↔ ROLE", "requirements": ["R3"] }
+    ],
+    "predicates": [
+      { "text": "dom holds ⊆ users", "requirements": ["R1"] },
+      { "text": "∀ r : ROLE • (r ↦ r) ∉ conflicts", "requirements": ["R3"] },
+      { "text": "∀ r₁, r₂ : ROLE • (r₁ ↦ r₂) ∈ conflicts ⇒ (r₂ ↦ r₁) ∈ conflicts", "requirements": ["R3"] },
+      {
+        "text": "∀ u : USER; r₁, r₂ : ROLE • (u ↦ r₁) ∈ holds ∧ (u ↦ r₂) ∈ holds ⇒ (r₁ ↦ r₂) ∉ conflicts",
+        "requirements": ["R4"],
+        "hidden": true
+      }
+    ]
+  },
+  "init": {
+    "name": "InitAccessControl",
+    "prompt": "At the start, there are no users.",
+    "declarations": [
+      { "text": "AccessControl", "requirements": [] }
+    ],
+    "predicates": [
+      { "text": "users = ∅", "requirements": ["R5"] }
+    ]
+  },
+  "operations": [
+    {
+      "name": "ListPermissions",
+      "kind": "query",
+      "prompt": "Output every permission that one of the user's roles grants.",
+      "declarations": [
+        { "text": "ΞAccessControl", "requirements": [] },
+        { "text": "user? : USER", "requirements": ["R6"] },
+        { "text": "perms! : ℙ PERMISSION", "requirements": ["R6"] }
+      ],
+      "predicates": [
+        { "text": "user? ∈ users", "requirements": ["R6"] },
+        {
+          "text": "perms! = { p ∈ PERMISSION | ∃ r : ROLE • (user? ↦ r) ∈ holds ∧ (r ↦ p) ∈ grants }",
+          "requirements": ["R6"],
+          "hidden": true
+        }
+      ]
+    },
+    {
+      "name": "AssignRole",
+      "kind": "update",
+      "prompt": "Give the user the role, unless it conflicts with a role they hold.",
+      "declarations": [
+        { "text": "ΔAccessControl", "requirements": [] },
+        { "text": "user? : USER", "requirements": ["R7"] },
+        { "text": "role? : ROLE", "requirements": ["R7"] }
+      ],
+      "predicates": [
+        { "text": "user? ∈ users", "requirements": ["R1"] },
+        { "text": "∀ r : ROLE • (user? ↦ r) ∈ holds ⇒ (r ↦ role?) ∉ conflicts", "requirements": ["R4"], "hidden": true },
+        { "text": "holds′ = holds ∪ {user? ↦ role?}", "requirements": ["R7"], "hidden": true },
+        { "text": "users′ = users", "requirements": [] },
+        { "text": "grants′ = grants", "requirements": [] },
+        { "text": "conflicts′ = conflicts", "requirements": [] }
+      ]
+    }
+  ],
+  "extraOperations": [
+    {
+      "name": "RevokeRole",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔAccessControl", "requirements": [] },
+        { "text": "user? : USER", "requirements": [] },
+        { "text": "role? : ROLE", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "(user? ↦ role?) ∈ holds", "requirements": [] },
+        { "text": "holds′ = holds ∖ {user? ↦ role?}", "requirements": [] },
+        { "text": "users′ = users", "requirements": [] },
+        { "text": "grants′ = grants", "requirements": [] },
+        { "text": "conflicts′ = conflicts", "requirements": [] }
+      ]
+    },
+    {
+      "name": "RemoveUser",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔAccessControl", "requirements": [] },
+        { "text": "user? : USER", "requirements": ["R1"] }
+      ],
+      "predicates": [
+        { "text": "user? ∈ users", "requirements": ["R1"] },
+        { "text": "user? ∉ dom holds", "requirements": ["R1"] },
+        { "text": "users′ = users ∖ {user?}", "requirements": ["R1"] },
+        { "text": "holds′ = holds", "requirements": [] },
+        { "text": "grants′ = grants", "requirements": [] },
+        { "text": "conflicts′ = conflicts", "requirements": [] }
+      ]
+    },
+    {
+      "name": "GrantPermission",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔAccessControl", "requirements": [] },
+        { "text": "role? : ROLE", "requirements": ["R2"] },
+        { "text": "perm? : PERMISSION", "requirements": ["R2"] }
+      ],
+      "predicates": [
+        { "text": "grants′ = grants ∪ {role? ↦ perm?}", "requirements": ["R2"] },
+        { "text": "users′ = users", "requirements": [] },
+        { "text": "holds′ = holds", "requirements": [] },
+        { "text": "conflicts′ = conflicts", "requirements": [] }
+      ]
+    }
+  ]
+}

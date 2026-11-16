@@ -1,0 +1,302 @@
+{
+  "title": "Role-Based Access Control",
+  "description": "Users are assigned to roles and roles are granted permissions. Some roles conflict with each other (separation of duty) and must never be held by the same user.",
+  "requirements": [
+    { "id": "R1", "text": "The system manages a set of registered users and a set of defined roles." },
+    { "id": "R2", "text": "Registered users can be assigned to defined roles. A user can hold several roles." },
+    { "id": "R3", "text": "Permissions are granted to roles, never directly to users." },
+    { "id": "R4", "text": "A user has a permission if and only if at least one of the user's roles has been granted that permission." },
+    { "id": "R5", "text": "Certain pairs of roles conflict (separation of duty, e.g. \"creates payments\" and \"approves payments\"). No user may hold two conflicting roles. No role conflicts with itself, and conflicts are mutual." },
+    { "id": "R6", "text": "For any user and permission, the system decides whether access is granted. Unknown users are denied." },
+    { "id": "R7", "text": "Roles can be revoked from users. When a user is removed, all of the user's role assignments are removed as well." },
+    { "id": "R8", "text": "A request that cannot be carried out leaves the system unchanged and reports the reason." }
+  ],
+  "givenSets": [
+    { "name": "USER", "comment": "All possible users." },
+    { "name": "ROLE", "comment": "All possible roles." },
+    { "name": "PERMISSION", "comment": "All possible permissions, e.g. \"approve payment\"." }
+  ],
+  "freeTypes": [
+    {
+      "name": "REPORT",
+      "constructors": ["ok", "unknownUser", "userExists", "unknownRole", "roleExists", "alreadyAssigned", "notAssigned", "roleConflict"],
+      "comment": "Outcome of an administrative request.",
+      "requirements": ["R8"]
+    },
+    {
+      "name": "DECISION",
+      "constructors": ["granted", "denied"],
+      "comment": "Result of an access check.",
+      "requirements": ["R6"]
+    }
+  ],
+  "abbreviations": [],
+  "axiomaticDefinitions": [
+    {
+      "comment": "The fixed separation-of-duty policy.",
+      "declarations": [
+        { "name": "conflict", "type": "ROLE ↔ ROLE", "comment": "Pairs of roles that no user may hold together.", "requirements": ["R5"] }
+      ],
+      "predicates": [
+        { "formula": "∀ r : ROLE • (r ↦ r) ∉ conflict", "comment": "No role conflicts with itself.", "requirements": ["R5"] },
+        { "formula": "∀ r₁, r₂ : ROLE • (r₁ ↦ r₂) ∈ conflict ⇒ (r₂ ↦ r₁) ∈ conflict", "comment": "Conflicts are mutual.", "requirements": ["R5"] }
+      ]
+    }
+  ],
+  "schemas": [
+    {
+      "name": "AccessControl",
+      "kind": "state",
+      "declarations": [
+        { "name": "users", "type": "ℙ USER", "comment": "Registered users.", "requirements": ["R1"] },
+        { "name": "roles", "type": "ℙ ROLE", "comment": "Defined roles.", "requirements": ["R1"] },
+        { "name": "ua", "type": "USER ↔ ROLE", "comment": "User assignment: which users hold which roles.", "requirements": ["R2"] },
+        { "name": "pa", "type": "ROLE ↔ PERMISSION", "comment": "Permission assignment: which roles have which permissions.", "requirements": ["R3"] },
+        { "name": "perms", "type": "USER ↔ PERMISSION", "comment": "Effective permissions of each user. Derived from ua and pa.", "requirements": ["R4"] }
+      ],
+      "predicates": [
+        { "formula": "dom ua ⊆ users ∧ ran ua ⊆ roles", "comment": "Only registered users hold roles, and only defined roles are held.", "requirements": ["R2"] },
+        { "formula": "dom pa ⊆ roles", "comment": "Only defined roles are granted permissions.", "requirements": ["R3"] },
+        { "formula": "∀ u : USER; p : PERMISSION • (u ↦ p) ∈ perms ⇔ (∃ r : ROLE • (u ↦ r) ∈ ua ∧ (r ↦ p) ∈ pa)", "comment": "perms is fully determined by ua and pa.", "requirements": ["R4"] },
+        { "formula": "∀ u : users • (ua⦇{u}⦈ × ua⦇{u}⦈) ∩ conflict = ∅", "comment": "Separation of duty: no user holds two conflicting roles.", "requirements": ["R5"] }
+      ]
+    },
+    {
+      "name": "InitAccessControl",
+      "kind": "init",
+      "declarations": [
+        { "include": "AccessControl'" }
+      ],
+      "predicates": [
+        { "formula": "users' = ∅ ∧ roles' = ∅" },
+        { "formula": "ua' = ∅ ∧ pa' = ∅", "comment": "Then perms' = ∅ follows from the state invariant." }
+      ]
+    },
+    {
+      "name": "Success",
+      "kind": "report",
+      "declarations": [
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r! = ok" }
+      ]
+    },
+    {
+      "name": "AddUser",
+      "kind": "operation",
+      "requirements": ["R1"],
+      "declarations": [
+        { "include": "ΔAccessControl" },
+        { "name": "u?", "type": "USER" }
+      ],
+      "predicates": [
+        { "formula": "u? ∉ users" },
+        { "formula": "users' = users ∪ {u?}" },
+        { "formula": "roles' = roles ∧ ua' = ua ∧ pa' = pa", "comment": "Unchanged. perms' is determined by the state invariant." }
+      ]
+    },
+    {
+      "name": "AddRole",
+      "kind": "operation",
+      "requirements": ["R1"],
+      "declarations": [
+        { "include": "ΔAccessControl" },
+        { "name": "r?", "type": "ROLE" }
+      ],
+      "predicates": [
+        { "formula": "r? ∉ roles" },
+        { "formula": "roles' = roles ∪ {r?}" },
+        { "formula": "users' = users ∧ ua' = ua ∧ pa' = pa", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "AssignRole",
+      "kind": "operation",
+      "requirements": ["R2", "R5"],
+      "declarations": [
+        { "include": "ΔAccessControl" },
+        { "name": "u?", "type": "USER" },
+        { "name": "r?", "type": "ROLE" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ users ∧ r? ∈ roles" },
+        { "formula": "(u? ↦ r?) ∉ ua" },
+        { "formula": "∀ r : ua⦇{u?}⦈ • (r ↦ r?) ∉ conflict", "comment": "The new role does not conflict with any role the user already holds.", "requirements": ["R5"] },
+        { "formula": "ua' = ua ∪ {u? ↦ r?}" },
+        { "formula": "users' = users ∧ roles' = roles ∧ pa' = pa", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "RevokeRole",
+      "kind": "operation",
+      "requirements": ["R7"],
+      "declarations": [
+        { "include": "ΔAccessControl" },
+        { "name": "u?", "type": "USER" },
+        { "name": "r?", "type": "ROLE" }
+      ],
+      "predicates": [
+        { "formula": "(u? ↦ r?) ∈ ua" },
+        { "formula": "ua' = ua ∖ {u? ↦ r?}" },
+        { "formula": "users' = users ∧ roles' = roles ∧ pa' = pa", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "GrantPermission",
+      "kind": "operation",
+      "requirements": ["R3"],
+      "declarations": [
+        { "include": "ΔAccessControl" },
+        { "name": "r?", "type": "ROLE" },
+        { "name": "p?", "type": "PERMISSION" }
+      ],
+      "predicates": [
+        { "formula": "r? ∈ roles" },
+        { "formula": "pa' = pa ∪ {r? ↦ p?}" },
+        { "formula": "users' = users ∧ roles' = roles ∧ ua' = ua", "comment": "Unchanged. Granting a permission cannot violate separation of duty, since that only constrains roles." }
+      ]
+    },
+    {
+      "name": "RemoveUser",
+      "kind": "operation",
+      "requirements": ["R7"],
+      "declarations": [
+        { "include": "ΔAccessControl" },
+        { "name": "u?", "type": "USER" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ users" },
+        { "formula": "users' = users ∖ {u?}" },
+        { "formula": "ua' = {u?} ⩤ ua", "comment": "All of the user's role assignments are removed." },
+        { "formula": "roles' = roles ∧ pa' = pa", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "CheckAccess",
+      "kind": "operation",
+      "comment": "Total: no precondition. Unknown users have no roles, hence no permissions, and are denied.",
+      "requirements": ["R6"],
+      "declarations": [
+        { "include": "ΞAccessControl" },
+        { "name": "u?", "type": "USER" },
+        { "name": "p?", "type": "PERMISSION" },
+        { "name": "d!", "type": "DECISION" }
+      ],
+      "predicates": [
+        { "formula": "(u? ↦ p?) ∈ perms ⇒ d! = granted" },
+        { "formula": "(u? ↦ p?) ∉ perms ⇒ d! = denied" }
+      ]
+    },
+    {
+      "name": "UnknownUser",
+      "kind": "error",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΞAccessControl" },
+        { "name": "u?", "type": "USER" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∉ users" },
+        { "formula": "r! = unknownUser" }
+      ]
+    },
+    {
+      "name": "UserExists",
+      "kind": "error",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΞAccessControl" },
+        { "name": "u?", "type": "USER" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ users" },
+        { "formula": "r! = userExists" }
+      ]
+    },
+    {
+      "name": "UnknownRole",
+      "kind": "error",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΞAccessControl" },
+        { "name": "r?", "type": "ROLE" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r? ∉ roles" },
+        { "formula": "r! = unknownRole" }
+      ]
+    },
+    {
+      "name": "RoleExists",
+      "kind": "error",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΞAccessControl" },
+        { "name": "r?", "type": "ROLE" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r? ∈ roles" },
+        { "formula": "r! = roleExists" }
+      ]
+    },
+    {
+      "name": "AlreadyAssigned",
+      "kind": "error",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΞAccessControl" },
+        { "name": "u?", "type": "USER" },
+        { "name": "r?", "type": "ROLE" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "(u? ↦ r?) ∈ ua" },
+        { "formula": "r! = alreadyAssigned" }
+      ]
+    },
+    {
+      "name": "NotAssigned",
+      "kind": "error",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΞAccessControl" },
+        { "name": "u?", "type": "USER" },
+        { "name": "r?", "type": "ROLE" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "(u? ↦ r?) ∉ ua" },
+        { "formula": "r! = notAssigned" }
+      ]
+    },
+    {
+      "name": "RoleConflict",
+      "kind": "error",
+      "requirements": ["R5", "R8"],
+      "declarations": [
+        { "include": "ΞAccessControl" },
+        { "name": "u?", "type": "USER" },
+        { "name": "r?", "type": "ROLE" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ users ∧ r? ∈ roles" },
+        { "formula": "∃ r : ua⦇{u?}⦈ • (r ↦ r?) ∈ conflict" },
+        { "formula": "r! = roleConflict" }
+      ]
+    }
+  ],
+  "schemaDefinitions": [
+    { "name": "AddUserTotal", "expression": "(AddUser ∧ Success) ∨ UserExists", "requirements": ["R1", "R8"] },
+    { "name": "AddRoleTotal", "expression": "(AddRole ∧ Success) ∨ RoleExists", "requirements": ["R1", "R8"] },
+    { "name": "AssignRoleTotal", "expression": "(AssignRole ∧ Success) ∨ UnknownUser ∨ UnknownRole ∨ AlreadyAssigned ∨ RoleConflict", "requirements": ["R2", "R5", "R8"] },
+    { "name": "RevokeRoleTotal", "expression": "(RevokeRole ∧ Success) ∨ NotAssigned", "requirements": ["R7", "R8"] },
+    { "name": "GrantPermissionTotal", "expression": "(GrantPermission ∧ Success) ∨ UnknownRole", "requirements": ["R3", "R8"] },
+    { "name": "RemoveUserTotal", "expression": "(RemoveUser ∧ Success) ∨ UnknownUser", "requirements": ["R7", "R8"] }
+  ]
+}

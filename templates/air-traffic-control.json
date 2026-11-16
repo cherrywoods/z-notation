@@ -1,0 +1,123 @@
+{
+  "id": "air-traffic-control",
+  "title": "Air Traffic Control",
+  "short": "Air Traffic Control",
+  "icon": "plane",
+  "description": "A tower clears approaching aircraft to land on its runways.",
+  "requirements": [
+    { "id": "R1", "text": "Only aircraft approaching under the tower's control can hold a landing clearance." },
+    { "id": "R2", "text": "An aircraft holds at most one landing clearance, for a single runway." },
+    { "id": "R3", "text": "At most one aircraft may be cleared to land on the same runway." },
+    { "id": "R4", "text": "No aircraft may be cleared to land on an occupied runway." },
+    { "id": "R5", "text": "Initially, no aircraft is under the tower's control." },
+    { "id": "R6", "text": "The tower can look up the runway an aircraft is cleared to land on." },
+    { "id": "R7", "text": "The tower can clear an approaching aircraft to land on a runway." }
+  ],
+  "givenSets": [
+    { "name": "AIRCRAFT", "values": ["DLH4AB", "BAW12", "AFR77", "SWR3", "EZY81", "RYR9", "UAL926", "KLM15"], "infinite": true },
+    { "name": "RUNWAY", "values": ["rwy07L", "rwy07R", "rwy25L", "rwy25R", "rwy18", "rwy36"] }
+  ],
+  "state": {
+    "name": "Tower",
+    "prompt": "No aircraft may be cleared to land on an occupied runway.",
+    "declarations": [
+      { "text": "approaching : ℙ AIRCRAFT", "requirements": ["R1"] },
+      { "text": "occupied : ℙ RUNWAY", "requirements": ["R4"] },
+      { "text": "cleared : AIRCRAFT ⇸ RUNWAY", "requirements": ["R2"] }
+    ],
+    "predicates": [
+      { "text": "dom cleared ⊆ approaching", "requirements": ["R1"] },
+      { "text": "∀ a₁, a₂ : dom cleared • cleared(a₁) = cleared(a₂) ⇒ a₁ = a₂", "requirements": ["R3"] },
+      { "text": "ran cleared ∩ occupied = ∅", "requirements": ["R4"], "hidden": true }
+    ]
+  },
+  "init": {
+    "name": "InitTower",
+    "prompt": "At the start, the tower controls no aircraft.",
+    "declarations": [
+      { "text": "Tower", "requirements": [] }
+    ],
+    "predicates": [
+      { "text": "approaching = ∅", "requirements": ["R5"] }
+    ]
+  },
+  "operations": [
+    {
+      "name": "FindClearance",
+      "kind": "query",
+      "prompt": "Output the runway the aircraft is cleared to land on.",
+      "declarations": [
+        { "text": "ΞTower", "requirements": [] },
+        { "text": "a? : AIRCRAFT", "requirements": ["R6"] },
+        { "text": "r! : RUNWAY", "requirements": ["R6"] }
+      ],
+      "predicates": [
+        { "text": "a? ∈ dom cleared", "requirements": ["R6"] },
+        { "text": "r! = cleared(a?)", "requirements": ["R6"], "hidden": true }
+      ]
+    },
+    {
+      "name": "ClearToLand",
+      "kind": "update",
+      "prompt": "The runway must be free, and nobody else may be cleared for it.",
+      "declarations": [
+        { "text": "ΔTower", "requirements": [] },
+        { "text": "a? : AIRCRAFT", "requirements": ["R7"] },
+        { "text": "r? : RUNWAY", "requirements": ["R7"] }
+      ],
+      "predicates": [
+        { "text": "a? ∈ approaching", "requirements": ["R1"] },
+        { "text": "a? ∉ dom cleared", "requirements": ["R2"] },
+        { "text": "r? ∉ occupied", "requirements": ["R4"], "hidden": true },
+        { "text": "r? ∉ ran cleared", "requirements": ["R3"], "hidden": true },
+        { "text": "cleared′ = cleared ∪ {a? ↦ r?}", "requirements": ["R7"] },
+        { "text": "approaching′ = approaching", "requirements": [] },
+        { "text": "occupied′ = occupied", "requirements": [] }
+      ]
+    }
+  ],
+  "extraOperations": [
+    {
+      "name": "Touchdown",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔTower", "requirements": [] },
+        { "text": "a? : AIRCRAFT", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "a? ∈ dom cleared", "requirements": [] },
+        { "text": "occupied′ = occupied ∪ {cleared(a?)}", "requirements": [] },
+        { "text": "cleared′ = cleared ∖ {a? ↦ cleared(a?)}", "requirements": [] },
+        { "text": "approaching′ = approaching ∖ {a?}", "requirements": [] }
+      ]
+    },
+    {
+      "name": "VacateRunway",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔTower", "requirements": [] },
+        { "text": "r? : RUNWAY", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "r? ∈ occupied", "requirements": [] },
+        { "text": "occupied′ = occupied ∖ {r?}", "requirements": [] },
+        { "text": "approaching′ = approaching", "requirements": [] },
+        { "text": "cleared′ = cleared", "requirements": [] }
+      ]
+    },
+    {
+      "name": "CancelClearance",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔTower", "requirements": [] },
+        { "text": "a? : AIRCRAFT", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "a? ∈ dom cleared", "requirements": [] },
+        { "text": "cleared′ = cleared ∖ {a? ↦ cleared(a?)}", "requirements": [] },
+        { "text": "approaching′ = approaching", "requirements": [] },
+        { "text": "occupied′ = occupied", "requirements": [] }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,136 @@
+{
+  "id": "bank-account",
+  "title": "Bank Accounts",
+  "short": "Bank Accounts",
+  "icon": "landmark",
+  "description": "Customer accounts with balances and overdraft limits.",
+  "requirements": [
+    { "id": "R1", "text": "Each open account has one owner, a balance and a non-negative overdraft limit (in euros)." },
+    { "id": "R2", "text": "No account may be overdrawn by more than its overdraft limit." },
+    { "id": "R3", "text": "Initially, no accounts are open." },
+    { "id": "R4", "text": "Only the owner of an account may query its balance." },
+    { "id": "R5", "text": "The owner of an account can withdraw a positive amount from it." }
+  ],
+  "givenSets": [
+    { "name": "ACCOUNT", "values": ["DE4711", "DE0815", "DE1234", "DE2024", "DE3141", "DE2718", "DE1001", "DE9999"], "infinite": true },
+    { "name": "CUSTOMER", "values": ["Mia", "Noah", "Lea", "Paul", "Emma", "Jonas", "Hanna", "Luis"], "infinite": true }
+  ],
+  "state": {
+    "name": "Bank",
+    "prompt": "No account may be overdrawn beyond its limit.",
+    "declarations": [
+      { "text": "owner : ACCOUNT ⇸ CUSTOMER", "requirements": ["R1"] },
+      { "text": "balance : ACCOUNT ⇸ ℤ", "requirements": ["R1"] },
+      { "text": "overdraft : ACCOUNT ⇸ ℕ", "requirements": ["R1"] }
+    ],
+    "predicates": [
+      { "text": "dom balance = dom owner", "requirements": ["R1"] },
+      { "text": "dom overdraft = dom owner", "requirements": ["R1"] },
+      { "text": "∀ a : dom balance • balance(a) ≥ -overdraft(a)", "requirements": ["R2"], "hidden": true }
+    ]
+  },
+  "init": {
+    "name": "InitBank",
+    "prompt": "At the start, no accounts are open.",
+    "declarations": [
+      { "text": "Bank", "requirements": [] }
+    ],
+    "predicates": [
+      { "text": "owner = ∅", "requirements": ["R3"] }
+    ]
+  },
+  "operations": [
+    {
+      "name": "QueryBalance",
+      "kind": "query",
+      "prompt": "Only the account's owner may see its balance.",
+      "declarations": [
+        { "text": "ΞBank", "requirements": [] },
+        { "text": "c? : CUSTOMER", "requirements": ["R4"] },
+        { "text": "a? : ACCOUNT", "requirements": ["R4"] },
+        { "text": "b! : ℤ", "requirements": ["R4"] }
+      ],
+      "predicates": [
+        { "text": "a? ∈ dom owner", "requirements": ["R4"] },
+        { "text": "owner(a?) = c?", "requirements": ["R4"], "hidden": true },
+        { "text": "b! = balance(a?)", "requirements": ["R4"] }
+      ]
+    },
+    {
+      "name": "Withdraw",
+      "kind": "update",
+      "prompt": "The withdrawal must stay within the overdraft limit.",
+      "declarations": [
+        { "text": "ΔBank", "requirements": [] },
+        { "text": "c? : CUSTOMER", "requirements": ["R5"] },
+        { "text": "a? : ACCOUNT", "requirements": ["R5"] },
+        { "text": "amount? : ℕ₁", "requirements": ["R5"] }
+      ],
+      "predicates": [
+        { "text": "a? ∈ dom owner", "requirements": ["R5"] },
+        { "text": "owner(a?) = c?", "requirements": ["R5"] },
+        { "text": "balance(a?) - amount? ≥ -overdraft(a?)", "requirements": ["R2"], "hidden": true },
+        { "text": "balance′ = (balance ∖ {a? ↦ balance(a?)}) ∪ {a? ↦ balance(a?) - amount?}", "requirements": ["R5"] },
+        { "text": "owner′ = owner", "requirements": [] },
+        { "text": "overdraft′ = overdraft", "requirements": [] }
+      ]
+    }
+  ],
+  "extraOperations": [
+    {
+      "name": "OpenAccount",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔBank", "requirements": [] },
+        { "text": "c? : CUSTOMER", "requirements": ["R1"] },
+        { "text": "limit? : ℕ", "requirements": ["R1"] },
+        { "text": "a! : ACCOUNT", "requirements": ["R1"] }
+      ],
+      "predicates": [
+        { "text": "a! ∉ dom owner", "requirements": ["R1"] },
+        { "text": "owner′ = owner ∪ {a! ↦ c?}", "requirements": ["R1"] },
+        { "text": "balance′ = balance ∪ {a! ↦ 0}", "requirements": ["R1"] },
+        { "text": "overdraft′ = overdraft ∪ {a! ↦ limit?}", "requirements": ["R1"] }
+      ]
+    },
+    {
+      "name": "Deposit",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔBank", "requirements": [] },
+        { "text": "a? : ACCOUNT", "requirements": [] },
+        { "text": "amount? : ℕ₁", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "a? ∈ dom owner", "requirements": [] },
+        { "text": "balance′ = (balance ∖ {a? ↦ balance(a?)}) ∪ {a? ↦ balance(a?) + amount?}", "requirements": [] },
+        { "text": "owner′ = owner", "requirements": [] },
+        { "text": "overdraft′ = overdraft", "requirements": [] }
+      ]
+    },
+    {
+      "name": "Transfer",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔBank", "requirements": [] },
+        { "text": "c? : CUSTOMER", "requirements": [] },
+        { "text": "from? : ACCOUNT", "requirements": [] },
+        { "text": "to? : ACCOUNT", "requirements": [] },
+        { "text": "amount? : ℕ₁", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "from? ∈ dom owner", "requirements": [] },
+        { "text": "owner(from?) = c?", "requirements": [] },
+        { "text": "to? ∈ dom owner", "requirements": [] },
+        { "text": "from? ≠ to?", "requirements": [] },
+        { "text": "balance(from?) - amount? ≥ -overdraft(from?)", "requirements": ["R2"] },
+        {
+          "text": "balance′ = (balance ∖ {from? ↦ balance(from?), to? ↦ balance(to?)}) ∪ {from? ↦ balance(from?) - amount?, to? ↦ balance(to?) + amount?}",
+          "requirements": []
+        },
+        { "text": "owner′ = owner", "requirements": [] },
+        { "text": "overdraft′ = overdraft", "requirements": [] }
+      ]
+    }
+  ]
+}

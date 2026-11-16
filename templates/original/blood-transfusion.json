@@ -1,0 +1,419 @@
+{
+  "title": "Blood Transfusion",
+  "description": "A hospital blood bank receives blood units, issues them to patients with a compatible blood type and records transfusions. Before a transfusion, two staff members check at the bedside that the unit belongs to the patient.",
+  "requirements": [
+    { "id": "R1", "text": "Every blood unit is registered with its blood type (ABO group and Rhesus factor) and its expiry time." },
+    { "id": "R2", "text": "A unit may only be issued to a patient whose blood type has been determined, and only if the unit's blood type is compatible with the patient's: O can be given to every ABO group, AB can receive from every ABO group, and otherwise the groups must be equal. Rhesus-negative blood can be given to everyone; Rhesus-positive blood only to Rhesus-positive patients." },
+    { "id": "R3", "text": "Each unit is issued at most once, to a single patient. An issued unit is no longer in stock." },
+    { "id": "R4", "text": "Expired units must not be received, issued or transfused." },
+    { "id": "R5", "text": "Before a transfusion, two different staff members must each check at the bedside that the unit was issued to the patient in front of them." },
+    { "id": "R6", "text": "A unit is transfused at most once, and only to the patient it was issued to. The time of the transfusion is recorded." },
+    { "id": "R7", "text": "Expired units in stock can be discarded." },
+    { "id": "R8", "text": "Once recorded, a patient's blood type cannot be overwritten." },
+    { "id": "R9", "text": "A request that cannot be carried out leaves all records unchanged and reports the reason." }
+  ],
+  "givenSets": [
+    { "name": "UNIT", "comment": "All possible blood units (bags)." },
+    { "name": "PATIENT", "comment": "All possible patients." },
+    { "name": "STAFF", "comment": "All possible staff members." }
+  ],
+  "freeTypes": [
+    { "name": "ABO", "constructors": ["O", "A", "B", "AB"], "comment": "ABO blood group.", "requirements": ["R1"] },
+    { "name": "RHESUS", "constructors": ["pos", "neg"], "comment": "Rhesus factor.", "requirements": ["R1"] },
+    {
+      "name": "REPORT",
+      "constructors": ["ok", "unitExists", "alreadyExpired", "typeAlreadyRecorded", "notInStock", "typeUnknown", "incompatible", "expired", "notIssued", "wrongPatient", "alreadyTransfused", "alreadyChecked", "tooFewChecks", "notExpired"],
+      "comment": "Outcome of a request.",
+      "requirements": ["R9"]
+    }
+  ],
+  "abbreviations": [
+    { "name": "BLOODTYPE", "definition": "ABO × RHESUS", "requirements": ["R1"] },
+    { "name": "TIME", "definition": "ℕ", "comment": "Time in minutes since the system was started." }
+  ],
+  "axiomaticDefinitions": [
+    {
+      "comment": "Red cell compatibility. (donor ↦ recipient) ∈ compatible means that blood of the donor's type may be given to a recipient of the recipient's type.",
+      "declarations": [
+        { "name": "compatible", "type": "BLOODTYPE ↔ BLOODTYPE", "requirements": ["R2"] }
+      ],
+      "predicates": [
+        { "formula": "∀ d, r : ABO; dr, rr : RHESUS • ((d, dr) ↦ (r, rr)) ∈ compatible ⇔ ((d = O ∨ d = r ∨ r = AB) ∧ (dr = neg ∨ rr = pos))", "requirements": ["R2"] }
+      ]
+    }
+  ],
+  "schemas": [
+    {
+      "name": "BloodBank",
+      "kind": "state",
+      "declarations": [
+        { "name": "now", "type": "TIME", "comment": "The current time." },
+        { "name": "bloodType", "type": "UNIT ⇸ BLOODTYPE", "comment": "Blood type of every registered unit.", "requirements": ["R1"] },
+        { "name": "expiry", "type": "UNIT ⇸ TIME", "comment": "Expiry time of every registered unit.", "requirements": ["R1"] },
+        { "name": "stock", "type": "ℙ UNIT", "comment": "Units available in the blood bank." },
+        { "name": "patientType", "type": "PATIENT ⇸ BLOODTYPE", "comment": "Determined blood types of patients.", "requirements": ["R2"] },
+        { "name": "issued", "type": "UNIT ⇸ PATIENT", "comment": "The patient each issued unit was issued to. Since this is a function, a unit is issued to at most one patient.", "requirements": ["R3"] },
+        { "name": "checks", "type": "UNIT ↔ STAFF", "comment": "Bedside checks: which staff members have checked which issued units.", "requirements": ["R5"] },
+        { "name": "transfusedAt", "type": "UNIT ⇸ TIME", "comment": "Time at which each transfused unit was transfused.", "requirements": ["R6"] }
+      ],
+      "predicates": [
+        { "formula": "dom expiry = dom bloodType", "requirements": ["R1"] },
+        { "formula": "stock ⊆ dom bloodType ∧ dom issued ⊆ dom bloodType", "comment": "Only registered units are in stock or issued.", "requirements": ["R1"] },
+        { "formula": "stock ∩ dom issued = ∅", "comment": "An issued unit is no longer in stock.", "requirements": ["R3"] },
+        { "formula": "∀ u : dom issued • issued u ∈ dom patientType ∧ (bloodType u ↦ patientType (issued u)) ∈ compatible", "comment": "Every issued unit is compatible with its patient.", "requirements": ["R2"] },
+        { "formula": "dom checks ⊆ dom issued", "comment": "Only issued units are checked.", "requirements": ["R5"] },
+        { "formula": "dom transfusedAt ⊆ dom issued", "comment": "Only issued units are transfused.", "requirements": ["R6"] },
+        { "formula": "∀ u : dom transfusedAt • transfusedAt u ≤ now ∧ transfusedAt u ≤ expiry u", "comment": "Transfusions lie in the past and happened before the unit expired.", "requirements": ["R4", "R6"] },
+        { "formula": "∀ u : dom transfusedAt • #(checks⦇{u}⦈) ≥ 2", "comment": "Two different staff members checked every transfused unit.", "requirements": ["R5"] }
+      ]
+    },
+    {
+      "name": "InitBloodBank",
+      "kind": "init",
+      "declarations": [
+        { "include": "BloodBank'" }
+      ],
+      "predicates": [
+        { "formula": "now' = 0" },
+        { "formula": "bloodType' = ∅ ∧ expiry' = ∅ ∧ stock' = ∅" },
+        { "formula": "patientType' = ∅ ∧ issued' = ∅ ∧ checks' = ∅ ∧ transfusedAt' = ∅" }
+      ]
+    },
+    {
+      "name": "Success",
+      "kind": "report",
+      "declarations": [
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r! = ok" }
+      ]
+    },
+    {
+      "name": "AdvanceClock",
+      "kind": "event",
+      "comment": "Time passes. Units in stock may expire as a result; this is why R4 is a precondition of IssueUnit and Transfuse and not an invariant of the stock.",
+      "declarations": [
+        { "include": "ΔBloodBank" },
+        { "name": "t?", "type": "TIME" }
+      ],
+      "predicates": [
+        { "formula": "t? ≥ now" },
+        { "formula": "now' = t?" },
+        { "formula": "bloodType' = bloodType ∧ expiry' = expiry ∧ stock' = stock", "comment": "Unchanged." },
+        { "formula": "patientType' = patientType ∧ issued' = issued ∧ checks' = checks ∧ transfusedAt' = transfusedAt", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "ReceiveUnit",
+      "kind": "operation",
+      "requirements": ["R1", "R4"],
+      "declarations": [
+        { "include": "ΔBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "bt?", "type": "BLOODTYPE" },
+        { "name": "exp?", "type": "TIME" }
+      ],
+      "predicates": [
+        { "formula": "u? ∉ dom bloodType" },
+        { "formula": "exp? ≥ now", "requirements": ["R4"] },
+        { "formula": "bloodType' = bloodType ∪ {u? ↦ bt?}" },
+        { "formula": "expiry' = expiry ∪ {u? ↦ exp?}" },
+        { "formula": "stock' = stock ∪ {u?}" },
+        { "formula": "now' = now ∧ patientType' = patientType ∧ issued' = issued ∧ checks' = checks ∧ transfusedAt' = transfusedAt", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "DetermineBloodType",
+      "kind": "operation",
+      "requirements": ["R2", "R8"],
+      "declarations": [
+        { "include": "ΔBloodBank" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "bt?", "type": "BLOODTYPE" }
+      ],
+      "predicates": [
+        { "formula": "p? ∉ dom patientType", "requirements": ["R8"] },
+        { "formula": "patientType' = patientType ∪ {p? ↦ bt?}" },
+        { "formula": "now' = now ∧ bloodType' = bloodType ∧ expiry' = expiry ∧ stock' = stock", "comment": "Unchanged." },
+        { "formula": "issued' = issued ∧ checks' = checks ∧ transfusedAt' = transfusedAt", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "IssueUnit",
+      "kind": "operation",
+      "requirements": ["R2", "R3", "R4"],
+      "declarations": [
+        { "include": "ΔBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "p?", "type": "PATIENT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ stock", "requirements": ["R3"] },
+        { "formula": "p? ∈ dom patientType", "requirements": ["R2"] },
+        { "formula": "(bloodType u? ↦ patientType p?) ∈ compatible", "requirements": ["R2"] },
+        { "formula": "now ≤ expiry u?", "requirements": ["R4"] },
+        { "formula": "stock' = stock ∖ {u?}" },
+        { "formula": "issued' = issued ∪ {u? ↦ p?}" },
+        { "formula": "now' = now ∧ bloodType' = bloodType ∧ expiry' = expiry", "comment": "Unchanged." },
+        { "formula": "patientType' = patientType ∧ checks' = checks ∧ transfusedAt' = transfusedAt", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "BedsideCheck",
+      "kind": "operation",
+      "comment": "Staff member s? scans the unit u? and the wristband of patient p?.",
+      "requirements": ["R5"],
+      "declarations": [
+        { "include": "ΔBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "s?", "type": "STAFF" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ dom issued" },
+        { "formula": "u? ∉ dom transfusedAt" },
+        { "formula": "issued u? = p?", "comment": "The unit was issued to the patient at the bedside." },
+        { "formula": "s? ∉ checks⦇{u?}⦈", "comment": "The same person cannot count as both checks." },
+        { "formula": "checks' = checks ∪ {u? ↦ s?}" },
+        { "formula": "now' = now ∧ bloodType' = bloodType ∧ expiry' = expiry ∧ stock' = stock", "comment": "Unchanged." },
+        { "formula": "patientType' = patientType ∧ issued' = issued ∧ transfusedAt' = transfusedAt", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "Transfuse",
+      "kind": "operation",
+      "requirements": ["R4", "R5", "R6"],
+      "declarations": [
+        { "include": "ΔBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "p?", "type": "PATIENT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ dom issued" },
+        { "formula": "issued u? = p?", "requirements": ["R6"] },
+        { "formula": "u? ∉ dom transfusedAt", "requirements": ["R6"] },
+        { "formula": "#(checks⦇{u?}⦈) ≥ 2", "requirements": ["R5"] },
+        { "formula": "now ≤ expiry u?", "requirements": ["R4"] },
+        { "formula": "transfusedAt' = transfusedAt ∪ {u? ↦ now}" },
+        { "formula": "now' = now ∧ bloodType' = bloodType ∧ expiry' = expiry ∧ stock' = stock", "comment": "Unchanged." },
+        { "formula": "patientType' = patientType ∧ issued' = issued ∧ checks' = checks", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "DiscardExpired",
+      "kind": "operation",
+      "comment": "The unit stays registered, so its history remains available.",
+      "requirements": ["R7"],
+      "declarations": [
+        { "include": "ΔBloodBank" },
+        { "name": "u?", "type": "UNIT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ stock" },
+        { "formula": "expiry u? < now" },
+        { "formula": "stock' = stock ∖ {u?}" },
+        { "formula": "now' = now ∧ bloodType' = bloodType ∧ expiry' = expiry", "comment": "Unchanged." },
+        { "formula": "patientType' = patientType ∧ issued' = issued ∧ checks' = checks ∧ transfusedAt' = transfusedAt", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "UnitExists",
+      "kind": "error",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ dom bloodType" },
+        { "formula": "r! = unitExists" }
+      ]
+    },
+    {
+      "name": "AlreadyExpired",
+      "kind": "error",
+      "requirements": ["R4", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "exp?", "type": "TIME" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "exp? < now" },
+        { "formula": "r! = alreadyExpired" }
+      ]
+    },
+    {
+      "name": "TypeAlreadyRecorded",
+      "kind": "error",
+      "requirements": ["R8", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∈ dom patientType" },
+        { "formula": "r! = typeAlreadyRecorded" }
+      ]
+    },
+    {
+      "name": "NotInStock",
+      "kind": "error",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∉ stock" },
+        { "formula": "r! = notInStock" }
+      ]
+    },
+    {
+      "name": "TypeUnknown",
+      "kind": "error",
+      "requirements": ["R2", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "p? ∉ dom patientType" },
+        { "formula": "r! = typeUnknown" }
+      ]
+    },
+    {
+      "name": "Incompatible",
+      "kind": "error",
+      "requirements": ["R2", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ dom bloodType ∧ p? ∈ dom patientType" },
+        { "formula": "(bloodType u? ↦ patientType p?) ∉ compatible" },
+        { "formula": "r! = incompatible" }
+      ]
+    },
+    {
+      "name": "Expired",
+      "kind": "error",
+      "requirements": ["R4", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ dom expiry" },
+        { "formula": "expiry u? < now" },
+        { "formula": "r! = expired" }
+      ]
+    },
+    {
+      "name": "NotIssued",
+      "kind": "error",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∉ dom issued" },
+        { "formula": "r! = notIssued" }
+      ]
+    },
+    {
+      "name": "WrongPatient",
+      "kind": "error",
+      "comment": "The most important error: the bedside check catches a unit at the wrong patient's bed.",
+      "requirements": ["R5", "R6", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "p?", "type": "PATIENT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ dom issued" },
+        { "formula": "issued u? ≠ p?" },
+        { "formula": "r! = wrongPatient" }
+      ]
+    },
+    {
+      "name": "AlreadyTransfused",
+      "kind": "error",
+      "requirements": ["R6", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ dom transfusedAt" },
+        { "formula": "r! = alreadyTransfused" }
+      ]
+    },
+    {
+      "name": "AlreadyChecked",
+      "kind": "error",
+      "requirements": ["R5", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "s?", "type": "STAFF" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "s? ∈ checks⦇{u?}⦈" },
+        { "formula": "r! = alreadyChecked" }
+      ]
+    },
+    {
+      "name": "TooFewChecks",
+      "kind": "error",
+      "requirements": ["R5", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "#(checks⦇{u?}⦈) < 2" },
+        { "formula": "r! = tooFewChecks" }
+      ]
+    },
+    {
+      "name": "NotExpired",
+      "kind": "error",
+      "requirements": ["R7", "R9"],
+      "declarations": [
+        { "include": "ΞBloodBank" },
+        { "name": "u?", "type": "UNIT" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "u? ∈ dom expiry" },
+        { "formula": "expiry u? ≥ now" },
+        { "formula": "r! = notExpired" }
+      ]
+    }
+  ],
+  "schemaDefinitions": [
+    { "name": "ReceiveUnitTotal", "expression": "(ReceiveUnit ∧ Success) ∨ UnitExists ∨ AlreadyExpired", "requirements": ["R1", "R4", "R9"] },
+    { "name": "DetermineBloodTypeTotal", "expression": "(DetermineBloodType ∧ Success) ∨ TypeAlreadyRecorded", "requirements": ["R8", "R9"] },
+    { "name": "IssueUnitTotal", "expression": "(IssueUnit ∧ Success) ∨ NotInStock ∨ TypeUnknown ∨ Incompatible ∨ Expired", "requirements": ["R2", "R3", "R4", "R9"] },
+    { "name": "BedsideCheckTotal", "expression": "(BedsideCheck ∧ Success) ∨ NotIssued ∨ WrongPatient ∨ AlreadyTransfused ∨ AlreadyChecked", "requirements": ["R5", "R9"] },
+    { "name": "TransfuseTotal", "expression": "(Transfuse ∧ Success) ∨ NotIssued ∨ WrongPatient ∨ AlreadyTransfused ∨ TooFewChecks ∨ Expired", "requirements": ["R4", "R5", "R6", "R9"] },
+    { "name": "DiscardExpiredTotal", "expression": "(DiscardExpired ∧ Success) ∨ NotInStock ∨ NotExpired", "requirements": ["R7", "R9"] }
+  ]
+}

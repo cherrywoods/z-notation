@@ -1,0 +1,188 @@
+{
+  "title": "Railway Block Signalling Interlocking",
+  "description": "A railway line is divided into blocks. Signals between blocks show red or green. The interlocking only lets a signal show green if this cannot lead to two trains in the same block.",
+  "requirements": [
+    { "id": "R1", "text": "The line is divided into blocks. At most one train may be in a block at any time." },
+    { "id": "R2", "text": "Each signal stands at the end of one block (its approach block) and protects entry into another block (its protected block). A signal shows either red (stop) or green (proceed)." },
+    { "id": "R3", "text": "A signal may only show green if the block it protects is free." },
+    { "id": "R4", "text": "At most one of the signals protecting the same block may show green at a time." },
+    { "id": "R5", "text": "A train may only pass a signal that shows green. The train then moves from the signal's approach block into its protected block, and the signal returns to red automatically." },
+    { "id": "R6", "text": "The signaller can request a signal to show green. The interlocking refuses the request, and reports why, if granting it would violate R3 or R4." },
+    { "id": "R7", "text": "The signaller can set any signal to red at any time." },
+    { "id": "R8", "text": "Trains enter the line only at entry blocks and leave only from exit blocks. A train can only enter if the entry block is free and no signal protecting it shows green." },
+    { "id": "R9", "text": "Initially, the line is empty and all signals show red." }
+  ],
+  "givenSets": [
+    { "name": "TRAIN", "comment": "All possible trains." },
+    { "name": "BLOCK", "comment": "The blocks of the line." },
+    { "name": "SIGNAL", "comment": "The signals of the line." }
+  ],
+  "freeTypes": [
+    { "name": "ASPECT", "constructors": ["red", "green"], "comment": "What a signal shows.", "requirements": ["R2"] },
+    { "name": "REPORT", "constructors": ["ok", "blockOccupied", "conflictingSignal"], "comment": "Outcome of a signaller request.", "requirements": ["R6"] }
+  ],
+  "abbreviations": [],
+  "axiomaticDefinitions": [
+    {
+      "comment": "The fixed track layout.",
+      "declarations": [
+        { "name": "approach", "type": "SIGNAL → BLOCK", "comment": "The block in which a train waits at the signal.", "requirements": ["R2"] },
+        { "name": "protected", "type": "SIGNAL → BLOCK", "comment": "The block the signal grants entry to.", "requirements": ["R2"] },
+        { "name": "entryBlocks", "type": "ℙ BLOCK", "requirements": ["R8"] },
+        { "name": "exitBlocks", "type": "ℙ BLOCK", "requirements": ["R8"] }
+      ],
+      "predicates": [
+        { "formula": "∀ s : SIGNAL • approach s ≠ protected s", "comment": "A signal leads from one block into a different block.", "requirements": ["R2"] }
+      ]
+    }
+  ],
+  "schemas": [
+    {
+      "name": "Interlocking",
+      "kind": "state",
+      "declarations": [
+        { "name": "at", "type": "TRAIN ⤔ BLOCK", "comment": "The block each train on the line is in. Since the function is injective, no two trains are in the same block.", "requirements": ["R1"] },
+        { "name": "aspect", "type": "SIGNAL → ASPECT", "comment": "What each signal shows. Total: every signal always shows something.", "requirements": ["R2"] }
+      ],
+      "predicates": [
+        { "formula": "∀ s : SIGNAL • aspect s = green ⇒ protected s ∉ ran at", "comment": "A green signal protects a free block.", "requirements": ["R3"] },
+        { "formula": "∀ s₁, s₂ : SIGNAL • aspect s₁ = green ∧ aspect s₂ = green ∧ protected s₁ = protected s₂ ⇒ s₁ = s₂", "comment": "No two green signals lead into the same block.", "requirements": ["R4"] }
+      ]
+    },
+    {
+      "name": "InitInterlocking",
+      "kind": "init",
+      "requirements": ["R9"],
+      "declarations": [
+        { "include": "Interlocking'" }
+      ],
+      "predicates": [
+        { "formula": "at' = ∅" },
+        { "formula": "aspect' = SIGNAL × {red}", "comment": "All signals show red." }
+      ]
+    },
+    {
+      "name": "Success",
+      "kind": "report",
+      "declarations": [
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "r! = ok" }
+      ]
+    },
+    {
+      "name": "ClearSignal",
+      "kind": "operation",
+      "comment": "The signaller requests a signal to show green. If it is green already, nothing changes.",
+      "requirements": ["R6"],
+      "declarations": [
+        { "include": "ΔInterlocking" },
+        { "name": "s?", "type": "SIGNAL" }
+      ],
+      "predicates": [
+        { "formula": "protected s? ∉ ran at", "requirements": ["R3"] },
+        { "formula": "∀ s : SIGNAL • s ≠ s? ∧ protected s = protected s? ⇒ aspect s = red", "requirements": ["R4"] },
+        { "formula": "aspect' = aspect ⊕ {s? ↦ green}" },
+        { "formula": "at' = at", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "SetRed",
+      "kind": "operation",
+      "comment": "No precondition: setting a signal to red is always safe.",
+      "requirements": ["R7"],
+      "declarations": [
+        { "include": "ΔInterlocking" },
+        { "name": "s?", "type": "SIGNAL" }
+      ],
+      "predicates": [
+        { "formula": "aspect' = aspect ⊕ {s? ↦ red}" },
+        { "formula": "at' = at", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "PassSignal",
+      "kind": "event",
+      "comment": "A train passes a signal, as reported by the track sensors. The precondition describes the movements this specification allows. A train passing a red signal is outside the specification.",
+      "requirements": ["R5"],
+      "declarations": [
+        { "include": "ΔInterlocking" },
+        { "name": "t?", "type": "TRAIN" },
+        { "name": "s?", "type": "SIGNAL" }
+      ],
+      "predicates": [
+        { "formula": "t? ∈ dom at" },
+        { "formula": "at t? = approach s?", "comment": "The train is waiting at the signal." },
+        { "formula": "aspect s? = green" },
+        { "formula": "at' = at ⊕ {t? ↦ protected s?}" },
+        { "formula": "aspect' = aspect ⊕ {s? ↦ red}", "comment": "The signal returns to red behind the train." }
+      ]
+    },
+    {
+      "name": "EnterLine",
+      "kind": "event",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΔInterlocking" },
+        { "name": "t?", "type": "TRAIN" },
+        { "name": "b?", "type": "BLOCK" }
+      ],
+      "predicates": [
+        { "formula": "t? ∉ dom at" },
+        { "formula": "b? ∈ entryBlocks" },
+        { "formula": "b? ∉ ran at" },
+        { "formula": "∀ s : SIGNAL • protected s = b? ⇒ aspect s = red", "comment": "No other train has been allowed into the entry block." },
+        { "formula": "at' = at ∪ {t? ↦ b?}" },
+        { "formula": "aspect' = aspect", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "LeaveLine",
+      "kind": "event",
+      "requirements": ["R8"],
+      "declarations": [
+        { "include": "ΔInterlocking" },
+        { "name": "t?", "type": "TRAIN" }
+      ],
+      "predicates": [
+        { "formula": "t? ∈ dom at" },
+        { "formula": "at t? ∈ exitBlocks" },
+        { "formula": "at' = {t?} ⩤ at" },
+        { "formula": "aspect' = aspect", "comment": "Unchanged." }
+      ]
+    },
+    {
+      "name": "BlockOccupied",
+      "kind": "error",
+      "requirements": ["R3", "R6"],
+      "declarations": [
+        { "include": "ΞInterlocking" },
+        { "name": "s?", "type": "SIGNAL" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "protected s? ∈ ran at" },
+        { "formula": "r! = blockOccupied" }
+      ]
+    },
+    {
+      "name": "ConflictingSignal",
+      "kind": "error",
+      "requirements": ["R4", "R6"],
+      "declarations": [
+        { "include": "ΞInterlocking" },
+        { "name": "s?", "type": "SIGNAL" },
+        { "name": "r!", "type": "REPORT" }
+      ],
+      "predicates": [
+        { "formula": "∃ s : SIGNAL • s ≠ s? ∧ protected s = protected s? ∧ aspect s = green" },
+        { "formula": "r! = conflictingSignal" }
+      ]
+    }
+  ],
+  "schemaDefinitions": [
+    { "name": "ClearSignalTotal", "expression": "(ClearSignal ∧ Success) ∨ BlockOccupied ∨ ConflictingSignal", "requirements": ["R6"] },
+    { "name": "SetRedTotal", "expression": "SetRed ∧ Success", "requirements": ["R7"] }
+  ]
+}

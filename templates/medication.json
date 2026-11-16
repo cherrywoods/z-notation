@@ -1,0 +1,125 @@
+{
+  "id": "medication",
+  "title": "Medication Prescribing",
+  "short": "Medication Prescribing",
+  "icon": "pill",
+  "description": "Doctors prescribe drugs to ward patients, respecting known allergies.",
+  "requirements": [
+    { "id": "R1", "text": "Allergies and prescriptions are only recorded for patients admitted to the ward." },
+    { "id": "R2", "text": "A patient can be allergic to several drugs and can be prescribed several drugs." },
+    { "id": "R3", "text": "A patient must never be prescribed a drug they are allergic to." },
+    { "id": "R4", "text": "Initially, no patients are admitted." },
+    { "id": "R5", "text": "Staff can look up the drugs currently prescribed to an admitted patient." },
+    { "id": "R6", "text": "A doctor can prescribe a drug to an admitted patient." }
+  ],
+  "givenSets": [
+    { "name": "PATIENT", "values": ["Ana", "Ben", "Chen", "Dana", "Emil", "Finn", "Gina", "Hugo"], "infinite": true },
+    {
+      "name": "DRUG",
+      "values": ["aspirin", "warfarin", "ibuprofen", "penicillin", "heparin", "insulin", "morphine", "codeine"], "infinite": true
+    }
+  ],
+  "state": {
+    "name": "Ward",
+    "prompt": "Nobody may be prescribed a drug they are allergic to.",
+    "declarations": [
+      { "text": "patients : ℙ PATIENT", "requirements": ["R1"] },
+      { "text": "allergic : PATIENT ↔ DRUG", "requirements": ["R2"] },
+      { "text": "prescribed : PATIENT ↔ DRUG", "requirements": ["R2"] }
+    ],
+    "predicates": [
+      { "text": "dom allergic ⊆ patients", "requirements": ["R1"] },
+      { "text": "dom prescribed ⊆ patients", "requirements": ["R1"] },
+      { "text": "prescribed ∩ allergic = ∅", "requirements": ["R3"], "hidden": true }
+    ]
+  },
+  "init": {
+    "name": "InitWard",
+    "prompt": "At the start, no patients are on the ward.",
+    "declarations": [
+      { "text": "Ward", "requirements": [] }
+    ],
+    "predicates": [
+      { "text": "patients = ∅", "requirements": ["R4"] }
+    ]
+  },
+  "operations": [
+    {
+      "name": "ViewPrescriptions",
+      "kind": "query",
+      "prompt": "Output all drugs currently prescribed to the patient.",
+      "declarations": [
+        { "text": "ΞWard", "requirements": [] },
+        { "text": "p? : PATIENT", "requirements": ["R5"] },
+        { "text": "drugs! : ℙ DRUG", "requirements": ["R5"] }
+      ],
+      "predicates": [
+        { "text": "p? ∈ patients", "requirements": ["R5"] },
+        { "text": "drugs! = { d ∈ DRUG | (p? ↦ d) ∈ prescribed }", "requirements": ["R5"], "hidden": true }
+      ]
+    },
+    {
+      "name": "Prescribe",
+      "kind": "update",
+      "prompt": "Prescribe the drug, but never one the patient is allergic to.",
+      "declarations": [
+        { "text": "ΔWard", "requirements": [] },
+        { "text": "p? : PATIENT", "requirements": ["R6"] },
+        { "text": "drug? : DRUG", "requirements": ["R6"] }
+      ],
+      "predicates": [
+        { "text": "p? ∈ patients", "requirements": ["R6"] },
+        { "text": "(p? ↦ drug?) ∉ allergic", "requirements": ["R3"], "hidden": true },
+        { "text": "prescribed′ = prescribed ∪ {p? ↦ drug?}", "requirements": ["R6"], "hidden": true },
+        { "text": "patients′ = patients", "requirements": [] },
+        { "text": "allergic′ = allergic", "requirements": [] }
+      ]
+    }
+  ],
+  "extraOperations": [
+    {
+      "name": "Admit",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔWard", "requirements": [] },
+        { "text": "p? : PATIENT", "requirements": ["R1"] }
+      ],
+      "predicates": [
+        { "text": "p? ∉ patients", "requirements": ["R1"] },
+        { "text": "patients′ = patients ∪ {p?}", "requirements": ["R1"] },
+        { "text": "allergic′ = allergic", "requirements": [] },
+        { "text": "prescribed′ = prescribed", "requirements": [] }
+      ]
+    },
+    {
+      "name": "RecordAllergy",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔWard", "requirements": [] },
+        { "text": "p? : PATIENT", "requirements": ["R1"] },
+        { "text": "drug? : DRUG", "requirements": ["R2"] }
+      ],
+      "predicates": [
+        { "text": "p? ∈ patients", "requirements": ["R1"] },
+        { "text": "allergic′ = allergic ∪ {p? ↦ drug?}", "requirements": ["R2"] },
+        { "text": "prescribed′ = prescribed ∖ {p? ↦ drug?}", "requirements": ["R3"] },
+        { "text": "patients′ = patients", "requirements": [] }
+      ]
+    },
+    {
+      "name": "Discontinue",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔWard", "requirements": [] },
+        { "text": "p? : PATIENT", "requirements": [] },
+        { "text": "drug? : DRUG", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "(p? ↦ drug?) ∈ prescribed", "requirements": [] },
+        { "text": "prescribed′ = prescribed ∖ {p? ↦ drug?}", "requirements": [] },
+        { "text": "patients′ = patients", "requirements": [] },
+        { "text": "allergic′ = allergic", "requirements": [] }
+      ]
+    }
+  ]
+}

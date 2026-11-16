@@ -1,0 +1,139 @@
+{
+  "id": "blood-transfusion",
+  "title": "Blood Transfusion",
+  "short": "Blood Transfusion",
+  "icon": "droplet",
+  "description": "A hospital blood bank issues blood units to patients.",
+  "requirements": [
+    { "id": "R1", "text": "Every unit in the blood bank is registered with its blood type." },
+    { "id": "R2", "text": "Blood is only issued to patients whose blood type has been determined." },
+    { "id": "R3", "text": "Each unit is issued at most once, to a single patient." },
+    { "id": "R4", "text": "A unit may only be issued to a patient with a compatible blood type." },
+    { "id": "R5", "text": "Initially, the blood bank holds no units." },
+    { "id": "R6", "text": "Staff can list the units not yet issued that are compatible with a patient's blood type." },
+    { "id": "R7", "text": "The blood bank can issue a unit to a patient." }
+  ],
+  "givenSets": [
+    { "name": "UNIT", "values": ["U101", "U102", "U103", "U104", "U105", "U106", "U107", "U108"], "infinite": true },
+    { "name": "PATIENT", "values": ["Ida", "Jan", "Kim", "Lou", "Max", "Nia", "Ole", "Pia"], "infinite": true },
+    { "name": "BLOODTYPE", "values": ["Oneg", "Opos", "Apos", "Bpos"] }
+  ],
+  "fixedValues": {
+    "compatible": "{Oneg ↦ Oneg, Oneg ↦ Opos, Oneg ↦ Apos, Oneg ↦ Bpos, Opos ↦ Opos, Opos ↦ Apos, Opos ↦ Bpos, Apos ↦ Apos, Bpos ↦ Bpos}"
+  },
+  "state": {
+    "name": "BloodBank",
+    "prompt": "Every issued unit must be compatible with its patient's blood type.",
+    "declarations": [
+      { "text": "unitType : UNIT ⇸ BLOODTYPE", "requirements": ["R1"] },
+      { "text": "patientType : PATIENT ⇸ BLOODTYPE", "requirements": ["R2"] },
+      { "text": "compatible : BLOODTYPE ↔ BLOODTYPE", "requirements": ["R4"] },
+      { "text": "issued : UNIT ⇸ PATIENT", "requirements": ["R3"] }
+    ],
+    "predicates": [
+      { "text": "dom issued ⊆ dom unitType", "requirements": ["R1"] },
+      { "text": "ran issued ⊆ dom patientType", "requirements": ["R2"] },
+      {
+        "text": "∀ u : dom issued • (unitType(u) ↦ patientType(issued(u))) ∈ compatible",
+        "requirements": ["R4"],
+        "hidden": true
+      }
+    ]
+  },
+  "init": {
+    "name": "InitBloodBank",
+    "prompt": "At the start, the blood bank holds no units.",
+    "declarations": [
+      { "text": "BloodBank", "requirements": [] }
+    ],
+    "predicates": [
+      { "text": "unitType = ∅", "requirements": ["R5"] }
+    ]
+  },
+  "operations": [
+    {
+      "name": "CompatibleUnits",
+      "kind": "query",
+      "prompt": "Output the units in stock that are compatible with the patient.",
+      "declarations": [
+        { "text": "ΞBloodBank", "requirements": [] },
+        { "text": "p? : PATIENT", "requirements": ["R6"] },
+        { "text": "units! : ℙ UNIT", "requirements": ["R6"] }
+      ],
+      "predicates": [
+        { "text": "p? ∈ dom patientType", "requirements": ["R2"] },
+        {
+          "text": "units! = { u ∈ dom unitType | u ∉ dom issued ∧ (unitType(u) ↦ patientType(p?)) ∈ compatible }",
+          "requirements": ["R6"],
+          "hidden": true
+        }
+      ]
+    },
+    {
+      "name": "IssueUnit",
+      "kind": "update",
+      "prompt": "A unit may be issued only once, and only to a compatible patient.",
+      "declarations": [
+        { "text": "ΔBloodBank", "requirements": [] },
+        { "text": "u? : UNIT", "requirements": ["R7"] },
+        { "text": "p? : PATIENT", "requirements": ["R7"] }
+      ],
+      "predicates": [
+        { "text": "u? ∈ dom unitType", "requirements": ["R1"] },
+        { "text": "u? ∉ dom issued", "requirements": ["R3"], "hidden": true },
+        { "text": "p? ∈ dom patientType", "requirements": ["R2"] },
+        { "text": "(unitType(u?) ↦ patientType(p?)) ∈ compatible", "requirements": ["R4"], "hidden": true },
+        { "text": "issued′ = issued ∪ {u? ↦ p?}", "requirements": ["R7"] },
+        { "text": "unitType′ = unitType", "requirements": [] },
+        { "text": "patientType′ = patientType", "requirements": [] },
+        { "text": "compatible′ = compatible", "requirements": [] }
+      ]
+    }
+  ],
+  "extraOperations": [
+    {
+      "name": "ReceiveUnit",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔBloodBank", "requirements": [] },
+        { "text": "u? : UNIT", "requirements": ["R1"] },
+        { "text": "type? : BLOODTYPE", "requirements": ["R1"] }
+      ],
+      "predicates": [
+        { "text": "u? ∉ dom unitType", "requirements": ["R1"] },
+        { "text": "unitType′ = unitType ∪ {u? ↦ type?}", "requirements": ["R1"] },
+        { "text": "patientType′ = patientType", "requirements": [] },
+        { "text": "compatible′ = compatible", "requirements": [] },
+        { "text": "issued′ = issued", "requirements": [] }
+      ]
+    },
+    {
+      "name": "DetermineBloodType",
+      "kind": "update",
+      "declarations": [
+        { "text": "ΔBloodBank", "requirements": [] },
+        { "text": "p? : PATIENT", "requirements": ["R2"] },
+        { "text": "type? : BLOODTYPE", "requirements": ["R2"] }
+      ],
+      "predicates": [
+        { "text": "p? ∉ dom patientType", "requirements": [] },
+        { "text": "patientType′ = patientType ∪ {p? ↦ type?}", "requirements": ["R2"] },
+        { "text": "unitType′ = unitType", "requirements": [] },
+        { "text": "compatible′ = compatible", "requirements": [] },
+        { "text": "issued′ = issued", "requirements": [] }
+      ]
+    },
+    {
+      "name": "UnitsIssuedTo",
+      "kind": "query",
+      "declarations": [
+        { "text": "ΞBloodBank", "requirements": [] },
+        { "text": "p? : PATIENT", "requirements": [] },
+        { "text": "units! : ℙ UNIT", "requirements": [] }
+      ],
+      "predicates": [
+        { "text": "units! = { u ∈ dom issued | issued(u) = p? }", "requirements": [] }
+      ]
+    }
+  ]
+}
