@@ -145,12 +145,6 @@ const STATIC: Record<string, Entry> = {
     definition: 'ℤ == {…, −2, −1, 0, 1, 2, …}',
     example: 'balance : ℤ',
   },
-  real: {
-    title: 'Real numbers',
-    short: 'All numbers, including decimals like 36.5 or −0.25.',
-    example: 'temperature : SENSOR ⇸ ℝ\n2.5 ∈ ℝ\n2.5 ∉ ℤ',
-    notes: ['Examples show a few short decimals. Write them with a point: 0.25, not 0,25.'],
-  },
   cross: {
     title: 'Cartesian product',
     short: '`X × Y` is the set of all pairs (x, y) with x ∈ X and y ∈ Y.',
@@ -454,7 +448,7 @@ const STATIC: Record<string, Entry> = {
     symbol: '',
     category: 'schema',
     title: 'Schema',
-    short: 'A named box: declarations above the line, predicates below. Predicate lines are joined by ∧.',
+    short: 'A named box that groups declarations (above the line) and predicates (below it, one per line; all of them must hold).',
     exampleSchema: LIB_STATE,
     notes: ['Read it as: these variables, and the conditions they satisfy.'],
   },

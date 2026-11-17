@@ -23,6 +23,8 @@ export interface ShownVar {
   status?: 'computed' | 'unchanged' | 'free';
   /** For status 'free': another value that would also be allowed (printValue text). */
   alternative?: string;
+  /** For status 'free': that other value itself. */
+  alternativeValue?: Value;
   /** Fixed example data (spec.fixed) rather than a generated value. */
   fixed?: boolean;
 }
@@ -37,6 +39,12 @@ export interface PredCheck {
   text: string;
   /** true / false, or 'undefined' when evaluation hit an undefined application. */
   result: boolean | 'undefined';
+  /**
+   * The verdict relied on cutting off an infinite set (only some numbers of ℕ / ℤ were
+   * tried, or only the example elements of an infinite given set were counted), so it
+   * may be wrong: show it as "≈" instead of ✓ / ✗. Only set (to true) when it did.
+   */
+  bounded?: boolean;
   /** For 'undefined': why, e.g. "borrower(Emma) is undefined: Emma ∉ dom borrower". */
   message?: string;
 }

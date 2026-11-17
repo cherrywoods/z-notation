@@ -209,6 +209,11 @@ export function toCmDiagnostics(diags: ZDiagnostic[], docLength: number): Diagno
 
 // ── theme ───────────────────────────────────────────────────────────────────
 
+/** The stylus icon of the prompts (src/ui/views/Prompt.svelte) as a CSS mask. */
+const STYLUS = `url("data:image/svg+xml,${encodeURIComponent(
+  "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.4' stroke-linejoin='round'><path d='M2.5 13.5h3l7.4-7.4a1.4 1.4 0 0 0 0-2l-1-1a1.4 1.4 0 0 0-2 0L2.5 10.5v3Z'/></svg>",
+)}")`;
+
 const zTheme = EditorView.theme({
   '&': {
     fontFamily: 'var(--font-z)',
@@ -221,11 +226,30 @@ const zTheme = EditorView.theme({
   '.cm-line': { padding: '0 4px' },
   '.cm-placeholder': {
     fontFamily: 'var(--font-ui)',
-    fontSize: '0.9rem',
+    fontSize: '0.95rem',
     fontStyle: 'normal',
-    color: 'var(--fg-faint)',
+    color: 'var(--ui-fg)',
   },
-  '.cm-cursor': { borderLeftColor: 'var(--fg)', borderLeftWidth: '1.5px' },
+  // one prompt per line, each with the same stylus as the step prompts
+  '.z-ph-line': { display: 'block' },
+  '.z-ph-line::before': {
+    content: '""',
+    display: 'inline-block',
+    width: '15px',
+    height: '15px',
+    marginRight: '10px',
+    verticalAlign: '-2px',
+    backgroundColor: 'currentColor',
+    maskImage: STYLUS,
+    WebkitMaskImage: STYLUS,
+    maskRepeat: 'no-repeat',
+    WebkitMaskRepeat: 'no-repeat',
+  },
+  // On an empty line CodeMirror may measure the caret next to the placeholder with
+  // height 0; keep it visible.
+  '.cm-cursor': { borderLeftColor: 'var(--fg)', borderLeftWidth: '1.5px', minHeight: '1.25em' },
+  // focused and still empty: the prompt steps back so the caret stands out
+  '&.cm-focused .cm-placeholder': { opacity: '0.55' },
   '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': {
     background: '#b6e3ff !important',
   },
@@ -296,6 +320,18 @@ export interface CreateOptions {
   onEdge?: (dir: 'next' | 'prev') => boolean;
 }
 
+/** Placeholder text → element with one line (and stylus) per `\n`-separated prompt. */
+function placeholderDom(text: string): HTMLElement {
+  const root = document.createElement('span');
+  for (const line of text.split('\n')) {
+    const el = document.createElement('span');
+    el.className = 'z-ph-line';
+    el.textContent = line;
+    root.append(el);
+  }
+  return root;
+}
+
 export function createZEditor(opts: CreateOptions): EditorView {
   const editable = new Compartment();
   const extensions: Extension[] = [
@@ -338,7 +374,7 @@ export function createZEditor(opts: CreateOptions): EditorView {
       }
     }),
   ];
-  if (opts.placeholder) extensions.push(placeholderExt(opts.placeholder));
+  if (opts.placeholder) extensions.push(placeholderExt(placeholderDom(opts.placeholder)));
   const view = new EditorView({
     parent: opts.parent,
     state: EditorState.create({ doc: opts.doc, extensions }),

@@ -1,4 +1,4 @@
-// Geometry of the topic ring: n bubbles evenly spaced (by angle) on an ellipse that fits
+// Geometry of the topic ring: n bubbles evenly spaced (by angle) on a circle that fits
 // the stage. The last bubble (own topic) sits at the bottom centre, the others follow
 // clockwise from the bottom left. Returns null if no reasonable ring fits (→ carousel).
 
@@ -25,9 +25,9 @@ export function ringLayout(w: number, h: number, n: number): RingLayout | null {
     const m = 0.6 * d + 6; // hovered bubble must stay inside the stage
     const ry0 = h / 2 - m;
     const rx0 = w / 2 - m;
-    // landscape: a wide ellipse; portrait: slightly upright
-    const ry = Math.min(ry0, rx0 * 1.3);
-    const rx = Math.min(rx0, ry * 1.6);
+    // always a true circle, at any window size
+    const ry = Math.min(ry0, rx0);
+    const rx = ry;
     if (ry <= 0) continue;
     const points = Array.from({ length: n }, (_, k) => {
       const a = Math.PI / 2 + ((k + 1) * 2 * Math.PI) / n;

@@ -8,6 +8,7 @@
   import { fly } from 'svelte/transition';
   import { stepHref } from '../../lib/router.svelte';
   import { opBadge, type StepInfo } from './steps';
+  import { scrollFade } from '../scrollFade';
 
   interface Props {
     topicId: string;
@@ -75,18 +76,31 @@
 
   let scroller: HTMLElement | undefined = $state();
 
-  // keep the current step visible when the row scrolls
+  // keep the current step visible when the row scrolls (also after the row's size changes)
   $effect(() => {
     void current;
     void steps.length;
-    const el = scroller?.querySelector<HTMLElement>('[aria-current="step"]');
-    if (!scroller || !el || scroller.scrollWidth <= scroller.clientWidth) return;
-    const left = el.offsetLeft - (scroller.clientWidth - el.offsetWidth) / 2;
-    scroller.scrollTo({ left, behavior: 'smooth' });
+    const row = scroller;
+    if (!row) return;
+    const reveal = (smooth: boolean) => {
+      const el = row.querySelector<HTMLElement>('[aria-current="step"]');
+      if (!el || row.scrollWidth <= row.clientWidth) return;
+      const r = row.getBoundingClientRect();
+      const e = el.getBoundingClientRect();
+      if (e.left >= r.left + 24 && e.right <= r.right - 24) return; // already in view
+      const left = row.scrollLeft + (e.left - r.left) - (row.clientWidth - e.width) / 2;
+      row.scrollTo({ left, behavior: smooth ? 'smooth' : 'instant' });
+    };
+    reveal(true);
+    const ro = new ResizeObserver(() => reveal(false));
+    ro.observe(row);
+    return () => ro.disconnect();
   });
+
+  const addLabel = $derived(canAddInit ? 'Add operation or Init' : 'Add operation');
 </script>
 
-<nav class="row" aria-label="Steps" bind:this={scroller}>
+<nav class="row" aria-label="Steps" bind:this={scroller} {@attach scrollFade()}>
   <ol>
     {#each entries as e, i (e.kind === 'add' ? '+' : e.step.id)}
       {#if i > 0}<li class="sep" aria-hidden="true">·</li>{/if}
@@ -98,8 +112,8 @@
             class:open={!!menu}
             bind:this={addBtn}
             onclick={plus}
-            title={canAddInit ? 'Add' : 'Add operation'}
-            aria-label={canAddInit ? 'Add' : 'Add operation'}
+            title={addLabel}
+            aria-label={addLabel}
             aria-haspopup={canAddInit ? 'menu' : undefined}
             aria-expanded={canAddInit ? !!menu : undefined}
           >
@@ -110,10 +124,11 @@
         <li>
           <a
             class="step"
+            title={e.step.label}
             href={stepHref(topicId, e.step.id)}
             aria-current={e.step.id === current ? 'step' : undefined}
           >
-            {e.step.label}{#if e.step.opKind}<span
+            <span class="label">{e.step.label}</span>{#if e.step.opKind}<span
                 class="badge"
                 title={e.step.opKind === 'query' ? 'query (Ξ: state unchanged)' : 'update (Δ: state changes)'}
                 >{opBadge(e.step.opKind)}</span
@@ -146,7 +161,6 @@
     overscroll-behavior-x: contain;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
-    mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
   }
   .row::-webkit-scrollbar {
     display: none;
@@ -260,5 +274,11 @@
   }
   .menu button:focus-visible {
     outline-offset: -2px;
+  }
+  /* long operation names: cut with … (the full name is in the tooltip) */
+  .label {
+    max-width: 14em;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

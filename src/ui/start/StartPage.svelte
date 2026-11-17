@@ -3,12 +3,14 @@
   faint presentation-mode trigger (bottom left; also key `p`).
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import { QrCode } from '@lucide/svelte';
   import { router, stepHref } from '../../lib/router.svelte';
   import { store } from '../../lib/spec/store.svelte';
   import { CUSTOM_ID, CUSTOM_TOPIC, TOPICS } from '../../lib/spec/topics';
   import ArrowButton from '../shell/ArrowButton.svelte';
   import { ringLayout } from './ring';
+  import { presenter } from '../present/presenter.svelte';
   import TopicRing from './TopicRing.svelte';
   import TopicCarousel from './TopicCarousel.svelte';
 
@@ -46,7 +48,7 @@
     } else {
       store.openTopic(id);
     }
-    router.go(stepHref(id, 'types'));
+    router.go(stepHref(id, 'about'));
   }
 
   /** Click on a ring bubble / tap on the centred carousel bubble. */
@@ -75,6 +77,11 @@
     const n = items.length;
     const next = i < 0 ? (delta > 0 ? 0 : n - 1) : (i + delta + n) % n;
     selected = items[next].id;
+    // ring: focus moves with the selection (roving tab stop)
+    if (mode === 'ring') {
+      const id = selected;
+      tick().then(() => document.querySelector<HTMLElement>(`.ring .bubble[data-topic="${id}"] button`)?.focus());
+    }
   }
 
   function typing(t: EventTarget | null) {
@@ -85,11 +92,6 @@
   function onkeydown(e: KeyboardEvent) {
     if (inert || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
     switch (e.key) {
-      case 'p':
-      case 'P':
-        e.preventDefault();
-        router.go('#/present');
-        break;
       case 'ArrowRight':
       case 'ArrowDown':
         e.preventDefault();
@@ -119,6 +121,12 @@
 
 <main class="start" class:carousel-mode={mode === 'carousel'}>
   <h1>Z Specification Language</h1>
+  {#if mode === 'carousel'}
+    <p class="pick">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 13.5h3l7.4-7.4a1.4 1.4 0 0 0 0-2l-1-1a1.4 1.4 0 0 0-2 0L2.5 10.5v3Z" /></svg>
+      Pick a system
+    </p>
+  {/if}
 
   <div class="stage" bind:clientWidth={stageW} bind:clientHeight={stageH}>
     {#if mode === 'ring' && layout}
@@ -154,9 +162,17 @@
     {/if}
   </div>
 
-  <a class="present" href="#/present" aria-label="Presentation mode" title="Presentation mode (P)">
+  <button
+    type="button"
+    class="present"
+    class:on={presenter.on}
+    aria-pressed={presenter.on}
+    aria-label="Presenter mode"
+    title="Presenter mode (P)"
+    onclick={() => presenter.toggle()}
+  >
     <QrCode size={18} strokeWidth={1.6} />
-  </a>
+  </button>
 </main>
 
 <ArrowButton
@@ -216,6 +232,23 @@
       margin-bottom: 8px;
     }
   }
+  .pick {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--ui-fg);
+    font-size: 1.05rem;
+  }
+  .pick svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linejoin: round;
+  }
   .carousel-wrap {
     position: absolute;
     inset: 0;
@@ -232,12 +265,28 @@
     place-items: center;
     width: 32px;
     height: 32px;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
     border-radius: 8px;
     color: var(--ui-fg);
     opacity: 0.3;
     transition:
       opacity 0.2s,
       background-color 0.2s;
+  }
+  .present.on {
+    opacity: 0.7;
+  }
+  /* presenting: the join footer sits at the bottom; keep the ring clear of it */
+  :global(html.presenting) .start {
+    padding-bottom: 96px;
+  }
+  @media (max-width: 699px) {
+    :global(html.presenting) .start {
+      padding-bottom: 0;
+    }
   }
   .present:hover,
   .present:focus-visible {

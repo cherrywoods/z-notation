@@ -115,12 +115,9 @@ export class Prover {
     return this.env.decls.get(name);
   }
 
-  /**
-   * Is T a whole given set (or ℝ), so that every well-typed element belongs to it?
-   * (Not ℤ: numbers may be decimals, and 2.5 ∉ ℤ.)
-   */
+  /** Is T a whole given set (or ℤ), so that every well-typed element belongs to it? */
   private isCarrier(T: Term): boolean {
-    return (T.kind === 'name' && this.env.givenSets.has(T.name)) || (T.kind === 'builtinSet' && T.set === 'ℝ');
+    return (T.kind === 'name' && this.env.givenSets.has(T.name)) || (T.kind === 'builtinSet' && T.set === 'ℤ');
   }
 
   /** One step with a rewrite law (dom (R ∪ S) = …), shown as a premise. */

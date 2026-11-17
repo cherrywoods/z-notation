@@ -26,7 +26,7 @@ interface TSchema {
 interface Template {
   id: string;
   title: string;
-  givenSets: { name: string; values?: string[] }[];
+  givenSets: { name: string; values?: string[]; infinite?: boolean }[];
   fixedValues?: Record<string, string>;
   state: TSchema;
   init?: TSchema | null;
@@ -38,9 +38,28 @@ const TEMPLATES = Object.entries(
   import.meta.glob('/templates/*.json', { eager: true, import: 'default' }) as Record<string, Template>,
 ).map(([path, t]) => ({ ...t, id: path.replace(/^.*\//, '').replace(/\.json$/, '') }));
 
-/** The template as the student first sees it (hidden lines left out), plus its fixed data. */
+/**
+ * A student half-way through: the template's non-hidden lines written, the key
+ * (hidden) lines still missing. (The app itself starts completely bare.)
+ */
 function studentSpec(t: Template): SpecDoc {
   const spec = createSpec(t.id);
+  const shown = (ls?: TLine[]) =>
+    (ls ?? [])
+      .filter((l) => !(l as TLine & { hidden?: boolean }).hidden)
+      .map((l) => l.text)
+      .join('\n');
+  spec.given = `[${t.givenSets.map((g) => g.name).join(', ')}]`;
+  spec.state.decls = shown(t.state.declarations);
+  spec.state.preds = shown(t.state.predicates);
+  if (spec.init && t.init) {
+    spec.init.decls = shown(t.init.declarations);
+    spec.init.preds = shown(t.init.predicates);
+  }
+  t.operations.forEach((o, i) => {
+    spec.operations[i].decls = shown(o.declarations);
+    spec.operations[i].preds = shown(o.predicates);
+  });
   if (t.fixedValues) spec.fixed = { ...t.fixedValues };
   return spec;
 }
@@ -62,6 +81,7 @@ function fullSpec(t: Template): SpecDoc {
     title: t.title,
     given: `[${t.givenSets.map((g) => g.name).join(', ')}]`,
     pools,
+    infinite: t.givenSets.filter((g) => g.infinite).map((g) => g.name),
     fixed: t.fixedValues,
     state: schema(t.state, 'state', 'state'),
     init: t.init ? schema(t.init, 'init', 'init') : null,
@@ -318,12 +338,12 @@ describe('Library', () => {
     const [ex, ms] = timed(() => exampleState(spec, an2, 1));
     expect(ex.ok).toBe(false);
     if (!ex.ok) {
-      expect(ex.message).toBe('No state satisfies all predicates.');
+      expect(ex.message).toBe('No example found with small values.');
       expect(ex.best?.failed.map((c) => c.text)).toContain('onLoan ≠ ∅');
     }
     expect(ms).toBeLessThan(100);
     const op = exampleOperation(spec, an2, 'op-lend', 1, 'applicable');
-    expect(op).toMatchObject({ ok: false, reason: 'no-before', message: 'No state satisfies the invariant.' });
+    expect(op).toMatchObject({ ok: false, reason: 'no-before', message: 'No example state found with small values.' });
   });
 
   it('reports a contradiction that needs search', () => {
@@ -335,7 +355,7 @@ describe('Library', () => {
   it('reports preconditions that never hold', () => {
     const spec = lib((s) => (s.operations[1].preds = 'book? ∉ onLoan\nbook? ∈ onLoan\nborrower′ = borrower ∪ {book? ↦ member?}'));
     const ex = exampleOperation(spec, analyseSpec(spec), 'op-lend', 2, 'applicable');
-    expect(ex).toMatchObject({ ok: false, reason: 'no-input', message: 'No state and inputs satisfy the preconditions.' });
+    expect(ex).toMatchObject({ ok: false, reason: 'no-input', message: 'No example found with small values in which the preconditions hold.' });
   });
 
   it('reports an effect that breaks the invariant', () => {
@@ -344,7 +364,7 @@ describe('Library', () => {
     expect(ex.ok).toBe(false);
     if (!ex.ok) {
       expect(ex.reason).toBe('no-after');
-      expect(ex.message).toBe('No after-state fits: the effect breaks ‘onLoan′ = dom borrower′’.');
+      expect(ex.message).toBe('No after-state found with small values: ‘onLoan′ = dom borrower′’ fails.');
       expect(ex.failed?.map((c) => c.text)).toContain('onLoan′ = dom borrower′');
       expect(ex.before?.length).toBe(2);
     }
@@ -464,74 +484,67 @@ describe('robustness', () => {
 
 // ── internals: graded distance and value generation ────────────────────────────
 
-describe('real numbers (ℝ)', () => {
-  const ward: SpecDoc = {
-    topicId: 'ward',
-    title: 'Ward',
-    given: '[SENSOR]',
-    pools: { SENSOR: ['s1', 's2', 's3', 's4', 's5'] },
-    state: {
-      id: 'state',
-      role: 'state',
-      name: 'Ward',
-      decls: 'temperature : SENSOR ⇸ ℝ\nalarms : ℕ\nprice : ℝ',
-      preds: '∀ s : dom temperature • temperature(s) ≥ 0',
-    },
+describe('infinite sets and the search limits', () => {
+  const one = (decls: string, preds: string, given = '[]', infinite: string[] = []): SpecDoc => ({
+    topicId: 't',
+    title: 'T',
+    given,
+    pools: {},
+    infinite,
+    state: { id: 'state', role: 'state', name: 'S', decls, preds },
     init: null,
-    operations: [
-      {
-        id: 'op-rec',
-        role: 'operation',
-        opKind: 'update',
-        name: 'Record',
-        decls: 'ΔWard\ns? : SENSOR\nt? : ℝ',
-        preds: 's? ∉ dom temperature\nt? > 36.5\ntemperature′ = temperature ∪ {s? ↦ t?}\nalarms′ = alarms\nprice′ = price',
-      },
-    ],
-  };
-  const readable = /^-?\d+(\.\d{1,2})?$/;
-  const num = (v: Value) => (v.k === 'int' ? v.v : NaN);
-
-  it('generates short decimals for ℝ and whole numbers for ℕ', () => {
-    const an = analyseSpec(ward);
-    expect(an.diagnostics).toEqual([]);
-    let decimals = 0;
-    for (const seed of SEEDS) {
-      const st = okState(exampleState(ward, an, seed));
-      expect(st.checks.every((c) => c.result === true)).toBe(true);
-      const temps = elems(byName(st.vars, 'temperature').value).map((p) => (p.k === 'tuple' ? num(p.elems[1]) : NaN));
-      for (const t of temps) {
-        expect(t).toBeGreaterThanOrEqual(0);
-        expect(String(t)).toMatch(readable);
-        if (!Number.isInteger(t)) decimals++;
-      }
-      expect(Number.isInteger(num(byName(st.vars, 'alarms').value))).toBe(true);
-      expect(byName(st.vars, 'price').text).toMatch(readable);
-    }
-    expect(decimals).toBeGreaterThan(10);
+    operations: [],
   });
 
-  it('solves constraints on decimals', () => {
-    const an = analyseSpec(ward);
-    for (const seed of SEEDS.slice(0, 10)) {
-      const ex = okOp(exampleOperation(ward, an, 'op-rec', seed, 'applicable'));
-      expect(ex.checks.every((c) => c.result === true)).toBe(true);
-      const t = byName(ex.inputs, 't?');
-      expect(num(t.value)).toBeGreaterThan(36.5);
-      expect(t.text).toMatch(readable);
-      expect(byName(ex.after, 'temperature′').text).toContain(`↦ ${t.text}`);
+  it('marks verdicts that rely on cutting off ℕ as bounded', () => {
+    const spec = one('x : ℕ', '∀ n : ℕ • n ≥ 0\nx = 3\n∀ n : 0 .. x • n ≤ 3');
+    const ex = okState(exampleState(spec, analyseSpec(spec), 1));
+    expect(ex.checks.map((c) => [c.text, c.result, c.bounded ?? false])).toEqual([
+      ['∀ n : ℕ • n ≥ 0', true, true],
+      ['x = 3', true, false],
+      ['∀ n : 0 .. x • n ≤ 3', true, false],
+    ]);
+  });
+
+  it('uses the numbers of the spec as candidates', () => {
+    const spec = one('x : ℕ', '∃ a : ℕ • ∃ b : ℕ • a * b = x ∧ x > 1000');
+    const ex = okState(exampleState(spec, analyseSpec(spec), 1));
+    expect(ex.vars[0].text).toBe('1001');
+    expect(ex.checks[0]).toMatchObject({ result: true });
+    expect(ex.checks[0].bounded).toBeUndefined(); // a witness decides exactly
+  });
+
+  it('honestly finds no example when only infinite values would do', () => {
+    for (const spec of [
+      one('s : ℙ ℕ', 's = { n : ℕ | n > 0 }'),
+      one('s : ℙ ℕ', '∀ n : ℕ • n ∈ s'),
+      one('f : NAME ⇸ DATE', '#f > 1000', '[NAME, DATE]', ['DATE']),
+      one('f : DATE ⇸ ℕ', '∀ d : DATE • d ∈ dom f', '[DATE]', ['DATE']),
+    ]) {
+      const ex = exampleState(spec, analyseSpec(spec), 1);
+      expect(ex).toMatchObject({ ok: false, message: 'No example found with small values.' });
     }
   });
 
-  it('measures the distance of comparisons with decimals', () => {
-    const T = (src: string) => parseTerm(src).term!;
-    const u = makeUniverse({});
-    const env = (x: number, y: number) => new Map<string, Value>([['x', { k: 'int', v: x }], ['y', { k: 'int', v: y }]]);
-    expect(dist(T('x < y'), env(1, 1.5), u)).toBe(0);
-    expect(dist(T('x > y'), env(1.5, 1.25), u)).toBe(0);
-    expect(dist(T('x ≥ y'), env(1, 1.5), u)).toBeGreaterThan(0);
-    // closer is better
-    expect(dist(T('x > y'), env(1, 1.5), u)).toBeLessThan(dist(T('x > y'), env(1, 3), u));
+  it('checks comprehensions over infinite given sets exactly', () => {
+    const spec = one('f : DATE ⇸ ℕ\ns : ℙ DATE', 's = { d : DATE | d ∈ dom f ∧ f(d) > 2 }\n#DATE > 0', '[DATE]', ['DATE']);
+    const ex = okState(exampleState(spec, analyseSpec(spec), 1));
+    expect(ex.checks.map((c) => [c.result, c.bounded ?? false])).toEqual([
+      [true, false],
+      [true, true], // #DATE only counts the example dates
+    ]);
+  });
+
+  it('gives exact verdicts for all templates (none relies on a cut-off)', () => {
+    for (const t of TEMPLATES) {
+      const spec = fullSpec(t);
+      const an = analyseSpec(spec);
+      const checks = [
+        ...okState(exampleState(spec, an, 1)).checks,
+        ...spec.operations.flatMap((op) => okOp(exampleOperation(spec, an, op.id, 1, 'applicable')).checks),
+      ];
+      expect(checks.filter((c) => c.bounded).map((c) => c.text), t.id).toEqual([]);
+    }
   });
 });
 
@@ -562,6 +575,10 @@ describe('distance used by the search', () => {
     '¬ (onLoan = ∅)',
     'onLoan = ∅ ⇔ borrower = ∅',
     '{ b : onLoan | borrower(b) = member? } = onLoan',
+    '∀ n : ℕ • n ≤ count + 20',
+    '∀ n : ℕ | n > 3 • n ≥ count',
+    '∃ n : ℕ • n > count * 100',
+    '{ n : ℕ | n < count } = 0 .. count - 1',
   ];
   const rng = makeRng(42, 'dist-test');
   const books = u.carriers.BOOK;

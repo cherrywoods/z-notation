@@ -86,17 +86,17 @@ const OUT_OF_SCOPE: Record<string, string> = {
   '↣': '‘↣’ (total injection) is not part of this tutorial — use ‘→’',
   '↠': '‘↠’ (surjection) is not part of this tutorial — use ‘→’',
   '⤖': '‘⤖’ (bijection) is not part of this tutorial — use ‘→’',
-  '⟨': 'Sequences ‘⟨ ⟩’ are not part of this tutorial',
-  '⟩': 'Sequences ‘⟨ ⟩’ are not part of this tutorial',
+  '⟨': 'Sequences (‘seq’, ‘⟨ ⟩’) are not part of this tutorial',
+  '⟩': 'Sequences (‘seq’, ‘⟨ ⟩’) are not part of this tutorial',
   '⁀': 'Sequences (‘⁀’) are not part of this tutorial',
   '≙': 'Schema definitions with ‘≙’ are not part of this tutorial — use the schema boxes',
-  '⨾': 'Relational composition is not part of this tutorial',
-  '∘': 'Relational composition is not part of this tutorial',
-  '∼': 'Relational inverse ‘∼’ is not part of this tutorial',
-  '˜': 'Relational inverse ‘˜’ is not part of this tutorial',
+  '⨾': 'Relational composition ‘⨾’ is not part of this tutorial — use ∃, e.g. ∃ y : Y • (x ↦ y) ∈ R ∧ (y ↦ z) ∈ S',
+  '∘': 'Relational composition ‘∘’ is not part of this tutorial — use ∃, e.g. ∃ y : Y • (x ↦ y) ∈ R ∧ (y ↦ z) ∈ S',
+  '∼': 'Relational inverse ‘∼’ is not part of this tutorial — swap the pair instead, e.g. (y ↦ x) ∈ R',
+  '˜': 'Relational inverse ‘˜’ is not part of this tutorial — swap the pair instead, e.g. (y ↦ x) ∈ R',
   '⁺': 'Transitive closure is not part of this tutorial',
-  '⋃': 'Generalised union ‘⋃’ is not part of this tutorial',
-  '⋂': 'Generalised intersection ‘⋂’ is not part of this tutorial',
+  '⋃': 'Generalised union ‘⋃’ is not part of this tutorial — use a set comprehension with ∃',
+  '⋂': 'Generalised intersection ‘⋂’ is not part of this tutorial — use a set comprehension with ∀',
   '▷': 'Range restriction ‘▷’ is not part of this tutorial — use a set comprehension',
   '⩥': 'Range subtraction ‘⩥’ is not part of this tutorial — use a set comprehension',
   '𝔽': 'Finite sets ‘𝔽’ are not part of this tutorial — use ‘ℙ’',
@@ -105,6 +105,14 @@ const OUT_OF_SCOPE: Record<string, string> = {
   '&': 'Write ‘∧’ for “and”',
   '/': 'Division ‘/’ is not part of this tutorial — use ‘div’ (division of whole numbers)',
   '⊕': '‘⊕’ (override) is not part of this tutorial — use ∪ and ∖ instead',
+  '⤀': '‘⤀’ (partial surjection) is not part of this tutorial — use ‘⇸’',
+  '⇻': '‘⇻’ (finite function) is not part of this tutorial — use ‘⇸’',
+  '⤕': '‘⤕’ (finite injection) is not part of this tutorial — use ‘⇸’',
+  '⇀': 'Write ‘⇸’ for a partial function',
+  '⟶': 'Write ‘→’ for a total function',
+  '⟷': 'Write ‘↔’ for a relation',
+  '⁻': 'Relational inverse (‘⁻¹’, ‘∼’) is not part of this tutorial — swap the pair instead, e.g. (y ↦ x) ∈ R',
+  'ℝ': '‘ℝ’ (real numbers) is not part of this tutorial — use ℤ (whole numbers)',
   '⩤': '‘⩤’ (domain subtraction) is not part of this tutorial — use ∖ or a set comprehension instead',
   '◁': '‘◁’ (domain restriction) is not part of this tutorial — use a set comprehension instead',
 };
@@ -112,9 +120,37 @@ const OUT_OF_SCOPE: Record<string, string> = {
 /** Identifiers (lexed as letters) that start out-of-scope constructs. */
 const OUT_OF_SCOPE_IDENT_PREFIX: [string, string][] = [
   ['θ', '‘θ’ (theta) is not part of this tutorial'],
-  ['λ', 'Lambda expressions (‘λ’) are not part of this tutorial'],
-  ['μ', '‘μ’ expressions are not part of this tutorial'],
+  ['λ', '‘λ’ (lambda) is not part of this tutorial — use a set comprehension, e.g. { x : X • (x ↦ e) }'],
+  ['μ', '‘μ’ (definite description) is not part of this tutorial — use ∃ or a function'],
 ];
+
+/** Words of out-of-scope constructs (treated as reserved). */
+const OUT_OF_SCOPE_WORDS: Record<string, string> = {
+  if: '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …',
+  then: '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …',
+  else: '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …',
+  let: '‘let’ is not part of this tutorial — write the expression out where it is used',
+};
+
+/** The arrow blocks of Unicode: an unknown arrow is one of the Z arrows we leave out. */
+const isArrow = (cp: string) => {
+  const c = cp.codePointAt(0) ?? 0;
+  return (c >= 0x2190 && c <= 0x21ff) || (c >= 0x27f0 && c <= 0x27ff) || (c >= 0x2900 && c <= 0x297f) || (c >= 0x2b00 && c <= 0x2bff);
+};
+
+/** ASCII spellings of the arrows left out (longest first). */
+const ASCII_ARROWS: [string, string][] = [
+  ['>->>', '⤖'],
+  ['+->>', '⤀'],
+  ['-->>', '↠'],
+  ['>-|>', '⤔'],
+  ['>->', '↣'],
+  ['>+>', '⤔'],
+  ['->>', '↠'],
+];
+
+const WHOLE_NUMBERS = 'Only whole numbers are part of this tutorial.';
+const TOO_LARGE = 'Numbers this large are not supported here.';
 
 const q = (s: string) => `‘${s}’`;
 
@@ -209,16 +245,27 @@ function chunkLines(lines: Line[], useDepth: boolean): Line[][] {
 function prescan(toks: Token[], text: string): void {
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
+    const prev = toks[i - 1];
+    const next = toks[i + 1];
+    if (t.kind === 'number') {
+      if (t.value.includes('.')) throw new ParseError(t.from, t.to, WHOLE_NUMBERS);
+      if (!Number.isSafeInteger(Number(t.value))) throw new ParseError(t.from, t.to, TOO_LARGE);
+    }
     if (t.kind === 'error') {
       const cp = String.fromCodePoint(text.codePointAt(t.from) ?? 0xfffd);
       // a stray decimal point: `.5` or `1.`
-      const prev = toks[i - 1];
-      const next = toks[i + 1];
-      if (cp === '.' && next?.kind === 'number' && next.from === t.to) {
-        throw new ParseError(t.from, next.to, `Write ${q('0.' + next.value)} instead of ${q('.' + next.value)}`);
+      if (cp === '.' && ((next?.kind === 'number' && next.from === t.to) || (prev?.kind === 'number' && prev.to === t.from))) {
+        throw new ParseError(t.from, t.to, WHOLE_NUMBERS);
       }
-      if (cp === '.' && prev?.kind === 'number' && prev.to === t.from) {
-        throw new ParseError(prev.from, t.to, `A decimal number needs digits after the point, e.g. ${q(prev.value + '.5')}`);
+      // ℙ₁ and ∃₁ (the subscript is not part of the symbol)
+      if (cp === '₁' && prev && prev.to === t.from && (prev.value === 'ℙ' || prev.value === '∃')) {
+        throw new ParseError(
+          prev.from,
+          t.to,
+          prev.value === 'ℙ'
+            ? '‘ℙ₁’ (non-empty subsets) is not part of this tutorial — use ℙ and add ‘S ≠ ∅’'
+            : '‘∃₁’ (exactly one) is not part of this tutorial — use ∃ and say that any two such values are equal',
+        );
       }
       throw new ParseError(t.from, t.from + cp.length, unknownSymbolMessage(cp));
     }
@@ -226,6 +273,8 @@ function prescan(toks: Token[], text: string): void {
       for (const [prefix, msg] of OUT_OF_SCOPE_IDENT_PREFIX) {
         if (t.value.startsWith(prefix)) throw new ParseError(t.from, t.to, msg);
       }
+      const word = OUT_OF_SCOPE_WORDS[t.value];
+      if (word) throw new ParseError(t.from, t.to, word);
     }
     const v = opv(t);
     const n = toks[i + 1];
@@ -246,7 +295,11 @@ function prescan(toks: Token[], text: string): void {
     if (v === '|' && opv(n) === '|' && adj(t, n)) {
       throw new ParseError(t.from, n.to, 'Write ‘∨’ for “or”');
     }
-    // ASCII spellings of the out-of-scope ⊕ (++), ◁ (<|) and ⩤ (<<|)
+    // ASCII spellings of the out-of-scope arrows (>->, ->>, …), ⊕ (++), ◁ (<|) and ⩤ (<<|)
+    if ((t.kind === 'sym' || t.kind === 'keyword') && !(prev && prev.to === t.from && (prev.kind === 'sym' || prev.kind === 'keyword'))) {
+      const hit = ASCII_ARROWS.find(([a]) => text.startsWith(a, t.from));
+      if (hit) throw new ParseError(t.from, t.from + hit[0].length, OUT_OF_SCOPE[hit[1]]);
+    }
     if (v === '+' && opv(n) === '+' && adj(t, n)) throw new ParseError(t.from, n.to, OUT_OF_SCOPE['⊕']);
     if (v === '<' && opv(n) === '|' && adj(t, n)) throw new ParseError(t.from, n.to, OUT_OF_SCOPE['◁']);
     if (v === '<' && opv(n) === '<' && opv(n2) === '|' && adj(t, n) && adj(n, n2)) {
@@ -256,7 +309,9 @@ function prescan(toks: Token[], text: string): void {
 }
 
 function unknownSymbolMessage(cp: string): string {
-  return OUT_OF_SCOPE[cp] ?? `Unknown symbol ${q(cp)}`;
+  if (OUT_OF_SCOPE[cp]) return OUT_OF_SCOPE[cp];
+  if (isArrow(cp)) return `${q(cp)} is not part of this tutorial — use ⇸, → or ↔`;
+  return `Unknown symbol ${q(cp)}`;
 }
 
 interface Item<T> {
@@ -605,7 +660,6 @@ class Parser {
       case 'ℕ':
       case 'ℕ₁':
       case 'ℤ':
-      case 'ℝ':
         this.next();
         return { kind: 'builtinSet', set: v, span: span(t.from, t.to) };
       case '∅':
@@ -817,7 +871,7 @@ class Parser {
     const t = this.peek();
     if (t.kind === 'eof') return;
     const v = opv(t);
-    if (t.kind === 'ident' || t.kind === 'number' || v === '(' || v === '{' || v === '∅' || v === 'ℕ' || v === 'ℤ' || v === 'ℕ₁' || v === 'ℝ') {
+    if (t.kind === 'ident' || t.kind === 'number' || v === '(' || v === '{' || v === '∅' || v === 'ℕ' || v === 'ℤ' || v === 'ℕ₁') {
       this.fail(t, `Missing operator before ${q(t.value)}`);
     }
     if (v === ')' || v === '}' || v === ']') this.fail(t, `Unexpected ${q(v)} — there is no matching opening bracket`);
@@ -826,7 +880,7 @@ class Parser {
       const prev = this.prevTok();
       const next = this.peek(1);
       if (prev?.kind === 'number' && prev.to === t.from && next.kind === 'number' && next.from === t.to) {
-        throw new ParseError(prev.from, next.to, `Write decimal numbers with a point: ${q(prev.value + '.' + next.value)}`);
+        throw new ParseError(prev.from, next.to, WHOLE_NUMBERS);
       }
       if (mode === 'pred') this.fail(t, 'Unexpected ‘,’ — put each predicate on its own line (or join them with ‘∧’)');
       this.fail(t, 'Unexpected ‘,’');
@@ -892,73 +946,52 @@ export function parseGiven(text: string): GivenParse {
       i = end;
       continue;
     }
-    // A group "[A, B, C]".
+    // A group "[A, B, C]": report problems, but keep reading names up to ']'.
     const open = t;
     if (first < 0) first = open.from;
     i++;
     let expectName = true;
     let count = 0;
+    let errors = 0;
+    const err = (from: number, to: number, message: string) => {
+      errors++;
+      diag(from, to, message);
+    };
     for (;;) {
       const u = toks[i];
       const uv = opv(u);
       if (u.kind === 'newline' || u.kind === 'eof') {
-        diag(open.from, open.to, 'Missing ‘]’ to close this ‘[’');
+        err(open.from, open.to, 'Missing ‘]’ to close this ‘[’');
         last = Math.max(last, toks[i - 1].to);
         break;
       }
-      if (u.kind === 'error') {
-        const cp = String.fromCodePoint(text.codePointAt(u.from) ?? 0xfffd);
-        diag(u.from, u.from + cp.length, unknownSymbolMessage(cp));
-        i = end;
-        break;
-      }
-      if (expectName) {
-        if (u.kind === 'ident') {
-          if (u.decoration) diag(u.from, u.to, `Given set names have no decoration — write ${q(u.base ?? u.value)}`);
-          names.push({ name: u.base ?? u.value, span: span(u.from, u.decorationFrom ?? u.to) });
-          count++;
-          expectName = false;
-          i++;
-          continue;
-        }
-        if (uv === ']') {
-          diag(u.from, u.to, count === 0 ? 'Write at least one name inside [ ]' : 'Expected a name after ‘,’');
-          last = u.to;
-          i++;
-          break;
-        }
-        if (uv === 'ℕ' || uv === 'ℤ' || uv === 'ℕ₁' || uv === 'ℝ') diag(u.from, u.to, `${q(uv)} is built in — no need to declare it`);
-        else diag(u.from, u.to, `Expected a set name, not ${q(u.value)}`);
-        // skip to the closing bracket (or the end of the line)
-        while (toks[i].kind !== 'newline' && toks[i].kind !== 'eof' && opv(toks[i]) !== ']') i++;
-        if (opv(toks[i]) === ']') {
-          last = toks[i].to;
-          i++;
-        }
-        break;
-      }
-      if (uv === ',') {
-        expectName = true;
-        i++;
-        continue;
-      }
-      if (uv === ']') {
-        last = u.to;
-        i++;
-        break;
-      }
+      i++;
       if (u.kind === 'ident') {
-        diag(u.from, u.to, 'Separate the names with ‘,’');
-        expectName = true; // recover: read it as the next name
-        continue;
+        if (!expectName) err(u.from, u.to, 'Separate the names with ‘,’');
+        if (u.decoration) err(u.from, u.to, `Given set names have no decoration — write ${q(u.base ?? u.value)}`);
+        names.push({ name: u.base ?? u.value, span: span(u.from, u.decorationFrom ?? u.to) });
+        count++;
+        expectName = false;
+      } else if (uv === ',') {
+        if (expectName && count > 0) err(u.from, u.to, 'Expected a name between the commas');
+        else if (expectName) err(u.from, u.to, 'Expected a name before ‘,’');
+        expectName = true;
+      } else if (uv === ']') {
+        last = u.to;
+        if (count === 0 && errors === 0) err(u.from, u.to, 'Write at least one name inside [ ]');
+        else if (expectName && count > 0) err(u.from, u.to, 'Expected a name after ‘,’');
+        break;
+      } else if (uv === 'ℕ' || uv === 'ℤ' || uv === 'ℕ₁') {
+        err(u.from, u.to, `${q(uv)} is built in — no need to declare it`);
+        expectName = false;
+      } else if (u.kind === 'error') {
+        const cp = String.fromCodePoint(text.codePointAt(u.from) ?? 0xfffd);
+        err(u.from, u.from + cp.length, unknownSymbolMessage(cp));
+        expectName = false;
+      } else {
+        err(u.from, u.to, `Unexpected ${q(u.value)} — given sets are written like [NAME, DATE]`);
+        expectName = false;
       }
-      diag(u.from, u.to, `Unexpected ${q(u.value)} — given sets are written like [NAME, DATE]`);
-      while (toks[i].kind !== 'newline' && toks[i].kind !== 'eof' && opv(toks[i]) !== ']') i++;
-      if (opv(toks[i]) === ']') {
-        last = toks[i].to;
-        i++;
-      }
-      break;
     }
   }
   const decl = names.length > 0 ? { names, span: span(first, last >= 0 ? last : text.length) } : null;
@@ -976,7 +1009,36 @@ export interface DeclsParse {
  */
 export function parseDecls(text: string): DeclsParse {
   const { items, diagnostics } = parseItems(text, true, (p) => p.declItem());
-  return { decls: items.flatMap((i) => (i.node ? [i.node] : [])), diagnostics };
+  const decls = items.flatMap((i) => (i.node ? [i.node] : []));
+  // The tutorial (like the lecture slides) declares one variable per line. The
+  // declarations are still kept, so the names do not cause follow-up errors.
+  const lineOf = (pos: number) => text.slice(0, pos).split('\n').length;
+  let prevLine = -1;
+  for (const d of decls) {
+    if (d.kind === 'var' && d.names.length > 1) {
+      const type = text.slice(d.type.span.from, d.type.span.to);
+      const [a, b] = d.names;
+      diagnostics.push({
+        from: d.names[0].span.from,
+        to: d.names[d.names.length - 1].span.to,
+        severity: 'error',
+        kind: 'syntax',
+        message: `Declare one variable per line: ‘${a.name} : ${type}’ and ‘${b.name} : ${type}’ on separate lines.`,
+      });
+    }
+    const line = lineOf(d.span.from);
+    if (line === prevLine) {
+      diagnostics.push({
+        from: d.span.from,
+        to: d.span.to,
+        severity: 'error',
+        kind: 'syntax',
+        message: 'Declare one variable per line: put this declaration on its own line.',
+      });
+    }
+    prevLine = line;
+  }
+  return { decls, diagnostics };
 }
 
 export interface PredItem {

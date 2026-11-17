@@ -159,6 +159,8 @@ export function analyseSpec(spec: SpecDoc): Analysis {
   for (const n of g.names) {
     if (givenSets.includes(n.name)) report(err(givenSec, n.span, `${q(n.name)} is declared twice.`, 'scope'));
     else givenSets.push(n.name);
+    const lookalike = NUMBER_SET_LOOKALIKES[n.name];
+    if (lookalike) report(err(givenSec, n.span, lookalike, 'scope', 'warning'));
   }
   const globals = new Map<string, Binding>(givenSets.map((n) => [n, { kind: 'given', type: power(given(n)) }]));
 
@@ -255,7 +257,7 @@ function declChecker(ctx: Ctx, section: SectionRef, role: SchemaRole, vars: () =
     unknownName: (t, scope) => {
       const v = vars().get(t.name) ?? ctx.stateVars.find((s) => s.name === splitName(t.name).base);
       if (v) {
-        // suggest the set the variable's elements come from: `temps : ℙ ℝ` → ℝ
+        // suggest the set the variable's elements come from: `counts : ℙ ℕ` → ℕ
         const d = v.declared;
         const el =
           d.kind === 'unop' && d.op === 'ℙ' ? printTerm(d.arg) : v.type.k === 'power' ? typeToString(v.type.elem, { relations: true }) : null;
@@ -263,7 +265,7 @@ function declChecker(ctx: Ctx, section: SectionRef, role: SchemaRole, vars: () =
         if (el && decl.type === (t as Term) && decl.names.length === 1) {
           return `${q(t.name)} is a variable, not a type. Declare ${q(`${declName} : ${el}`)} and add ${q(`${declName} ∈ ${t.name}`)} below the line.`;
         }
-        return `${q(t.name)} is a variable — above the line use types only (given sets, ℕ, ℤ, ℝ, ℙ, ⇸ …) and state conditions below the line.`;
+        return `${q(t.name)} is a variable — above the line use types only (given sets, ℕ, ℤ, ℙ, ⇸ …) and state conditions below the line.`;
       }
       return unknownNameMessage(t, scope, ctx, role, 'none');
     },
@@ -299,6 +301,8 @@ function unknownNameMessage(t: NameTerm, scope: Scope, ctx: Ctx, role: SchemaRol
   }
   // the same name with another decoration (book → book?, member? → member!) is the most likely fix
   const names = [...scope.keys()];
+  const special = OUT_OF_SCOPE_NAMES[name] ?? (decoration === '' && /^i?seq/.test(name) ? OUT_OF_SCOPE_NAMES.seq : undefined);
+  if (special) return special;
   const sameBase = names.find((n) => n !== name && splitName(n).base === base);
   const suggestion = sameBase ?? closestName(name, names);
   if (suggestion) return `Unknown name ${q(name)} — did you mean ${q(suggestion)}?`;
@@ -310,6 +314,33 @@ function unknownNameMessage(t: NameTerm, scope: Scope, ctx: Ctx, role: SchemaRol
   }
   return `Unknown name ${q(name)}.`;
 }
+
+/**
+ * Names that are not declared but mean something students know from elsewhere:
+ * functions outside the tutorial, or ASCII spellings of ℕ / ℤ / ℙ.
+ */
+const OUT_OF_SCOPE_NAMES: Record<string, string> = {
+  seq: 'Sequences (‘seq’, ‘⟨ ⟩’) are not part of this tutorial.',
+  min: '‘min’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x : S • m ≤ x).',
+  max: '‘max’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x : S • x ≤ m).',
+  succ: '‘succ’ is not part of this tutorial — write ‘n + 1’.',
+  N: 'Unknown name ‘N’ — did you mean ℕ (type NN)?',
+  NN: 'Unknown name ‘NN’ — did you mean ℕ (type NN and a space)?',
+  N1: 'Unknown name ‘N1’ — did you mean ℕ₁ (type NN1)?',
+  NN1: 'Unknown name ‘NN1’ — did you mean ℕ₁ (type NN1 and a space)?',
+  Z: 'Unknown name ‘Z’ — did you mean ℤ (type ZZ)?',
+  ZZ: 'Unknown name ‘ZZ’ — did you mean ℤ (type ZZ and a space)?',
+  R: 'Unknown name ‘R’ — real numbers are not part of this tutorial; use ℤ (type ZZ).',
+  PP: 'Unknown name ‘PP’ — did you mean ℙ (type PP and a space)?',
+};
+
+/** Given sets that look like a misspelt number set. */
+const NUMBER_SET_LOOKALIKES: Record<string, string> = {
+  N: 'Did you mean ℕ (type NN)? ‘N’ is declared here as a new given set.',
+  N1: 'Did you mean ℕ₁ (type NN1)? ‘N1’ is declared here as a new given set.',
+  Z: 'Did you mean ℤ (type ZZ)? ‘Z’ is declared here as a new given set.',
+  R: 'Real numbers are not part of this tutorial — did you mean ℤ (type ZZ)? ‘R’ is declared here as a new given set.',
+};
 
 /** Closest candidate by edit distance (small typos only), or null. */
 function closestName(name: string, candidates: string[]): string | null {
@@ -552,6 +583,9 @@ function analyseOperation(doc: SchemaDoc, state: SchemaInfo, ctx: Ctx): SchemaIn
   const S = ctx.stateName;
   let imp: 'Δ' | 'Ξ' | null = null;
   let pseudo = false; // state imported in a wrong way; keep checking without follow-up errors
+  type Include = Extract<Decl, { kind: 'include' }>;
+  const plain: Include[] = []; // `S` lines
+  const primed: Include[] = []; // `S′` lines
   for (const d of p.decls) {
     if (d.kind === 'delta' || d.kind === 'xi') {
       const sym = d.kind === 'delta' ? 'Δ' : 'Ξ';
@@ -562,9 +596,25 @@ function analyseOperation(doc: SchemaDoc, state: SchemaInfo, ctx: Ctx): SchemaIn
       imp = sym;
       if (d.schema !== S) ctx.report(err(p.declSec, d.span, `The state schema is called ${q(S)} — write ${q(sym + S)}.`));
     } else if (d.kind === 'include') {
-      badInclude(ctx, p.declSec, d, 'operation');
-      if (splitName(d.schema).base === S) pseudo = true;
+      const { base, decoration } = splitName(d.schema);
+      if (base === S && decoration === '') plain.push(d);
+      else if (base === S && decoration === '′') primed.push(d);
+      else badInclude(ctx, p.declSec, d, 'operation');
     }
+  }
+  // `S` and `S′` on two lines import the state before and after: exactly ΔS.
+  for (const d of [...plain.slice(1), ...primed.slice(1)]) ctx.report(err(p.declSec, d.span, 'The state is already imported.'));
+  if (plain.length && primed.length) {
+    if (imp) {
+      const later = primed[0].span.from > plain[0].span.from ? primed[0] : plain[0];
+      ctx.report(err(p.declSec, later.span, `${q(S)} and ${q(S + '′')} together already mean ${q('Δ' + S)} — remove one of the imports.`));
+    } else imp = 'Δ';
+  } else if (primed.length) {
+    ctx.report(err(p.declSec, primed[0].span, `Write ${q('Δ' + S)} to import the state before and after.`));
+    pseudo = true;
+  } else if (plain.length) {
+    badInclude(ctx, p.declSec, plain[0], 'operation');
+    pseudo = true;
   }
   if (!imp && !pseudo) {
     ctx.report(

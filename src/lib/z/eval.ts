@@ -1,13 +1,19 @@
 // Evaluator for well-typed terms over a finite example universe.
 //
-// Given sets are the finite example carriers of a `Universe`. ℕ, ℤ, ℝ, ℙ S, X ⇸ Y, …
-// evaluate to lazy sets: membership is exact (e.g. 5000 ∈ ℕ₁, 2.5 ∉ ℕ, 2.5 ∈ ℝ), but
-// whenever such a set must be *listed* (∀ n : ℕ, { n : ℕ | … }) integers are bounded
-// by [intMin, intMax] and enumeration gives up beyond `enumLimit` elements. ℝ can
-// never be listed (a 'too-large' EvalError).
+// Given sets are the finite example carriers of a `Universe`. ℕ, ℤ, ℙ S, X ⇸ Y, …
+// evaluate to lazy sets: membership is exact (e.g. 5000 ∈ ℕ₁).
 //
-// Numbers are normalised to 15 significant digits when created (see `int` in
-// values.ts), so 0.1 + 0.2 = 0.3 holds and equal-looking numbers are equal.
+// Infinite sets and honest verdicts. When ℕ or ℤ must be *listed* (∀ n : ℕ,
+// { n : ℕ | … }) only a window [intMin, intMax] plus a few "probe" numbers beyond it
+// can be tried. A verdict that depended on such a cut-off is *bounded*
+// (`evalPredChecked` reports it), unless a concrete witness decides it exactly:
+// ∀ n : ℕ • n < 50 is exactly false because the probe 100 is a counterexample.
+// A comprehension over ℕ becomes an `approx` set that knows some of its elements and
+// can test membership, so a finite set never wrongly equals {n : ℕ | n > 0}.
+//
+// Given sets that are infinite in principle (`Universe.infinite`) are checked
+// exactly: example values only ever use the carrier's atoms, so all other elements
+// behave alike, and one generic atom ("another DATE") stands for all of them.
 //
 // Logical connectives short-circuit (left to right), so `x ∈ dom f ⇒ f(x) = y` never
 // evaluates the undefined `f(x)`. Undefined applications throw an EvalError.
@@ -17,8 +23,8 @@ import { printTerm } from './print';
 import {
   EMPTY,
   atom,
-  formatNumber,
   compareValues,
+  containsFresh,
   int,
   isPair,
   isSetLike,
@@ -29,9 +35,12 @@ import {
   tuple,
   valueEquals,
   valueKey,
+  type AtomValue,
   type LazyDesc,
+  type LazySetValue,
   type SetLike,
   type SetValue,
+  type TupleValue,
   type Value,
 } from './values';
 
@@ -43,6 +52,10 @@ export interface Universe {
   intMax: number;
   /** Maximum number of elements a set may have to be enumerated (default 5000). */
   enumLimit?: number;
+  /** Given sets that are infinite in principle: their carrier is only an example. */
+  infinite?: readonly string[];
+  /** Extra numbers to try beyond [intMin, intMax] (e.g. the constants of the spec). */
+  probes?: readonly number[];
 }
 
 export type Env = ReadonlyMap<string, Value>;
@@ -60,41 +73,73 @@ export class EvalError extends Error {
   }
 }
 
+/** A result and whether it relied on cutting off an infinite set. */
+export interface Checked<T> {
+  value: T;
+  bounded: boolean;
+}
+
 const DEFAULT_LIMIT = 5000;
+/** Numbers beyond the window that are always tried when ℕ / ℤ are listed. */
+const PROBES = [50, 100, 1000, 1000000];
 
 /** Build a universe from value pools: {BOOK: ['Dune', 'Emma']} → atoms with pool order. */
 export function makeUniverse(
   pools: Record<string, readonly string[]>,
-  opts: { intMin?: number; intMax?: number; enumLimit?: number } = {},
+  opts: { intMin?: number; intMax?: number; enumLimit?: number; infinite?: readonly string[]; probes?: readonly number[] } = {},
 ): Universe {
   const carriers: Record<string, Value[]> = {};
   for (const [set, names] of Object.entries(pools)) carriers[set] = names.map((n, i) => atom(set, n, i));
-  return { carriers, intMin: opts.intMin ?? -10, intMax: opts.intMax ?? 10, enumLimit: opts.enumLimit };
+  return {
+    carriers,
+    intMin: opts.intMin ?? -10,
+    intMax: opts.intMax ?? 10,
+    enumLimit: opts.enumLimit,
+    infinite: opts.infinite,
+    probes: opts.probes,
+  };
 }
 
 // ── per-universe context ───────────────────────────────────────────────────────
 
-interface Ctx {
+interface Base {
   u: Universe;
   limit: number;
-  carrierSets: Map<string, SetValue>;
+  carrierSets: Map<string, SetLike>;
 }
-const ctxCache = new WeakMap<Universe, Ctx>();
+interface Ctx extends Base {
+  /** Set when a result relied on cutting off an infinite set. */
+  track: { bounded: boolean };
+}
+const baseCache = new WeakMap<Universe, Base>();
 function ctxOf(u: Universe): Ctx {
-  let c = ctxCache.get(u);
-  if (!c) {
-    c = { u, limit: u.enumLimit ?? DEFAULT_LIMIT, carrierSets: new Map() };
-    ctxCache.set(u, c);
+  let b = baseCache.get(u);
+  if (!b) {
+    b = { u, limit: u.enumLimit ?? DEFAULT_LIMIT, carrierSets: new Map() };
+    baseCache.set(u, b);
   }
-  return c;
+  return { ...b, track: { bounded: false } };
 }
-function carrier(name: string, c: Ctx): SetValue | undefined {
+function carrier(name: string, c: Ctx): SetLike | undefined {
   let s = c.carrierSets.get(name);
   if (!s && Object.prototype.hasOwnProperty.call(c.u.carriers, name)) {
-    s = mkSet(c.u.carriers[name]);
+    const sample = mkSet(c.u.carriers[name]);
+    s = c.u.infinite?.includes(name) ? lazy({ kind: 'given', set: name, sample }) : sample;
     c.carrierSets.set(name, s);
   }
   return s;
+}
+
+/** Run `f` with its own bounded flag; returns the result and that flag (the caller decides). */
+function tracked<T>(c: Ctx, f: () => T): [T, boolean] {
+  const saved = c.track.bounded;
+  c.track.bounded = false;
+  try {
+    const v = f();
+    return [v, c.track.bounded];
+  } finally {
+    c.track.bounded = saved;
+  }
 }
 
 // ── public API ─────────────────────────────────────────────────────────────────
@@ -109,18 +154,44 @@ export function evalPred(t: Term, env: Env, u: Universe): boolean {
   return pred(t, env, ctxOf(u));
 }
 
+/** Evaluate a predicate and say whether the verdict relied on cutting off an infinite set. */
+export function evalPredChecked(t: Term, env: Env, u: Universe): Checked<boolean> {
+  const c = ctxOf(u);
+  const value = pred(t, env, c);
+  return { value, bounded: c.track.bounded };
+}
+
+/** Evaluate an expression and say whether the value relied on cutting off an infinite set. */
+export function evalTermChecked(t: Term, env: Env, u: Universe): Checked<Value> {
+  const c = ctxOf(u);
+  const value = ev(t, env, c);
+  return { value, bounded: c.track.bounded };
+}
+
 /** Is `v` an element of the (possibly lazy) set `s`? Exact, also for ℕ, ℙ S, X ⇸ Y, … */
 export function memberOf(v: Value, s: SetLike, u: Universe): boolean {
   return member(v, s, ctxOf(u));
 }
 
 /**
- * List the elements of a set, with ℕ / ℤ bounded by the universe. Returns null if
- * there are more than `limit` elements (default: the universe's enumLimit).
+ * List the elements of a set, with ℕ / ℤ bounded by the universe (and infinite given
+ * sets cut to their example carrier). Returns null if there are more than `limit`
+ * elements (default: the universe's enumLimit).
  */
 export function enumerateSet(s: SetLike, u: Universe, limit?: number): Value[] | null {
   const c = ctxOf(u);
   return enumerate(s, limit === undefined ? c : { ...c, limit }, true);
+}
+
+/**
+ * The values a quantifier `∀ x : s` tries, exactly as the evaluator does: for ℕ / ℤ
+ * the window plus probe numbers (`probe` marks values beyond the window, whose
+ * evaluation errors are ignored), for an infinite given set its carrier plus generic
+ * atoms. `cut`: the list is not complete. Null if there are too many values.
+ */
+export function bindingValues(s: SetLike, env: Env, u: Universe): { values: Value[]; probe: boolean[]; cut: boolean } | null {
+  const L = listFor(s, ctxOf(u), env);
+  return L && { values: L.items.map((i) => i.v), probe: L.items.map((i) => i.probe), cut: L.cut };
 }
 
 /**
@@ -133,8 +204,9 @@ export function memberOfDeclared(v: Value, declaredSet: Term, env: Env, u: Unive
 }
 
 /**
- * All members of a declared set (ℕ / ℤ bounded by the universe), e.g. all candidates
- * for an input `book? : BOOK`. Returns null if there are too many.
+ * All members of a declared set (ℕ / ℤ bounded by the universe, infinite given sets
+ * by their carrier), e.g. all candidates for an input `book? : BOOK`. Returns null if
+ * there are too many.
  */
 export function enumerateDeclared(declaredSet: Term, env: Env, u: Universe, limit?: number): Value[] | null {
   const c = ctxOf(u);
@@ -145,6 +217,11 @@ export function enumerateDeclared(declaredSet: Term, env: Env, u: Universe, limi
 /** Exact equality of values, materialising lazy sets where possible. */
 export function equalValues(a: Value, b: Value, u: Universe): boolean {
   return equal(a, b, ctxOf(u));
+}
+
+/** Is the set infinite? null if unknown (a comprehension over ℕ that may be finite). */
+export function isInfiniteSet(s: SetLike, u: Universe): boolean | null {
+  return infiniteSet(s, ctxOf(u));
 }
 
 // ── expressions ────────────────────────────────────────────────────────────────
@@ -161,21 +238,13 @@ function ev(t: Term, env: Env, c: Ctx): Value {
     case 'num':
       return int(t.value);
     case 'builtinSet':
-      return lazy({ kind: t.set === 'ℕ' ? 'nat' : t.set === 'ℕ₁' ? 'nat1' : t.set === 'ℝ' ? 'real' : 'int' });
+      return lazy({ kind: t.set === 'ℕ' ? 'nat' : t.set === 'ℕ₁' ? 'nat1' : 'int' });
     case 'emptyset':
       return EMPTY;
     case 'setDisplay':
       return mkSet(t.elems.map((e) => ev(e, env, c)));
-    case 'setComp': {
-      const out: Value[] = [];
-      const names = t.decls.flatMap((d) => d.names.map((n) => n.name));
-      for (const env2 of bindings(t.decls, env, c, t)) {
-        if (t.pred && !pred(t.pred, env2, c)) continue;
-        if (t.expr) out.push(ev(t.expr, env2, c));
-        else out.push(names.length === 1 ? env2.get(names[0])! : tuple(names.map((n) => env2.get(n)!)));
-      }
-      return mkSet(out);
-    }
+    case 'setComp':
+      return comprehension(t, env, c);
     case 'tuple':
       return tuple(t.elems.map((e) => ev(e, env, c)));
     case 'cross': {
@@ -207,6 +276,66 @@ function ev(t: Term, env: Env, c: Ctx): Value {
       throw new EvalError(`${q(printTerm(t))} is a predicate, not a value`, t.span);
   }
   throw new EvalError(`Cannot evaluate ${q(printTerm(t as Term))}`, (t as Term).span);
+}
+
+let approxIds = 0;
+/** Membership tests of approx sets (comprehensions without `• e`). */
+const approxMembers = new WeakMap<LazySetValue, (v: Value, c: Ctx) => boolean>();
+
+/** `{ x : S | P • e }`. Over an infinite set the result is an `approx` set. */
+function comprehension(t: Extract<Term, { kind: 'setComp' }>, env: Env, c: Ctx): Value {
+  const names = t.decls.flatMap((d) => d.names.map((n) => n.name));
+  const info = { cut: false };
+  const out: Value[] = [];
+  let unsure = false; // some element test relied on a cut-off
+  let generic = false; // an element contains a generic atom: there are infinitely many such
+  for (const { env: env2, probe } of bindings(t.decls, env, c, t, info)) {
+    try {
+      let ok = true;
+      if (t.pred) {
+        const [p, pb] = tracked(c, () => pred(t.pred!, env2, c));
+        ok = p;
+        unsure ||= pb;
+      }
+      if (!ok) continue;
+      let v: Value;
+      if (t.expr) {
+        const [e, eb] = tracked(c, () => ev(t.expr!, env2, c));
+        v = e;
+        unsure ||= eb;
+      } else v = names.length === 1 ? env2.get(names[0])! : tuple(names.map((n) => env2.get(n)!));
+      if (containsFresh(v)) generic = true;
+      else out.push(v);
+    } catch (e) {
+      if (probe && e instanceof EvalError) {
+        unsure = true;
+        continue;
+      }
+      throw e;
+    }
+  }
+  if (unsure) c.track.bounded = true;
+  if (!info.cut && !generic) return mkSet(out);
+  const s = lazy({ kind: 'approx', id: ++approxIds, known: mkSet(out), infinite: generic });
+  if (!t.expr) approxMembers.set(s, (v, c2) => compMember(t, env, names, v, c2));
+  return s;
+}
+
+/** v ∈ { x : S; y : T | P } — exact, without listing anything. */
+function compMember(t: Extract<Term, { kind: 'setComp' }>, env: Env, names: string[], v: Value, c: Ctx): boolean {
+  const vals = names.length === 1 ? [v] : v.k === 'tuple' && v.elems.length === names.length ? v.elems : null;
+  if (!vals) return false;
+  const env2 = new Map(env);
+  let k = 0;
+  for (const d of t.decls) {
+    for (const n of d.names) {
+      const dom = asSetLike(ev(d.type, env2, c), d.type);
+      const x = vals[k++];
+      if (!member(x, dom, c)) return false;
+      env2.set(n.name, x);
+    }
+  }
+  return !t.pred || pred(t.pred, env2, c);
 }
 
 function evBinop(t: Extract<Term, { kind: 'binop' }>, env: Env, c: Ctx): Value {
@@ -244,18 +373,12 @@ function evBinop(t: Extract<Term, { kind: 'binop' }>, env: Env, c: Ctx): Value {
     case 'mod': {
       const a = asInt(l, t.left);
       const b = asInt(r, t.right);
-      for (const [n, side] of [[a, t.left], [b, t.right]] as [number, Term][]) {
-        if (Number.isInteger(n)) continue;
-        const what = side.kind === 'num' ? `${formatNumber(n)} is not one` : `${q(printTerm(side))} is ${formatNumber(n)}`;
-        throw new EvalError(`${t.op} works on whole numbers, but ${what}`, t.span);
-      }
       if (b === 0) throw new EvalError(`${q(printTerm(t))} is undefined: division by zero`, t.span, 'undefined');
       const d = Math.floor(a / b); // Z: a div b rounds down, a mod b = a - b * (a div b)
       return int(t.op === 'div' ? d : a - b * d);
     }
     case '..':
-      // the whole numbers from lo to hi
-      return smallOrLazy({ kind: 'range', lo: Math.ceil(asInt(l, t.left)), hi: Math.floor(asInt(r, t.right)) }, c);
+      return smallOrLazy({ kind: 'range', lo: asInt(l, t.left), hi: asInt(r, t.right) }, c);
   }
 }
 
@@ -312,15 +435,8 @@ function pred(t: Term, env: Env, c: Ctx): boolean {
           return pred(t.left, env, c) === pred(t.right, env, c);
       }
       break;
-    case 'quant': {
-      for (const env2 of bindings(t.decls, env, c, t)) {
-        if (t.pred && !pred(t.pred, env2, c)) continue;
-        const b = pred(t.body, env2, c);
-        if (t.q === '∀' && !b) return false;
-        if (t.q === '∃' && b) return true;
-      }
-      return t.q === '∀';
-    }
+    case 'quant':
+      return quantifier(t, env, c);
     case 'rel': {
       const l = ev(t.left, env, c);
       const r = ev(t.right, env, c);
@@ -354,45 +470,112 @@ function pred(t: Term, env: Env, c: Ctx): boolean {
   throw new EvalError(`Cannot evaluate ${q(printTerm(t as Term))}`, (t as Term).span);
 }
 
-function subset(l: Value, r: Value, t: Extract<Term, { kind: 'rel' }>, c: Ctx): boolean {
-  const rs = asSetLike(r, t.right);
-  if (l.k === 'lazy' && rs.k === 'lazy') {
-    // ℕ₁ ⊆ ℕ ⊆ ℤ ⊆ ℝ, and large ranges inside them
-    const rank: Record<string, number> = { nat1: 1, nat: 2, int: 3, real: 4 };
-    const ld = l.desc;
-    if (valueEquals(l, rs)) return true;
-    if (ld.kind in rank && rs.desc.kind in rank) return rank[ld.kind] <= rank[rs.desc.kind];
-    if (ld.kind === 'range' && (rs.desc.kind in rank || rs.desc.kind === 'range')) {
-      return ld.lo > ld.hi || (member(int(ld.lo), rs, c) && member(int(ld.hi), rs, c));
+/**
+ * ∀ / ∃. A counterexample (∀) or witness (∃) whose evaluation did not rely on a
+ * cut-off decides exactly; otherwise the verdict is bounded if the listing was cut.
+ */
+function quantifier(t: Extract<Term, { kind: 'quant' }>, env: Env, c: Ctx): boolean {
+  const info = { cut: false };
+  let unsure = false;
+  let unsureHit = false;
+  for (const { env: env2, probe } of bindings(t.decls, env, c, t, info)) {
+    let gb = false;
+    let b: boolean;
+    let bb: boolean;
+    try {
+      if (t.pred) {
+        const [g, gbound] = tracked(c, () => pred(t.pred!, env2, c));
+        gb = gbound;
+        if (!g) {
+          unsure ||= gb;
+          continue;
+        }
+      }
+      [b, bb] = tracked(c, () => pred(t.body, env2, c));
+    } catch (e) {
+      if (probe && e instanceof EvalError) {
+        unsure = true;
+        continue;
+      }
+      throw e;
     }
+    const hit = t.q === '∀' ? !b : b;
+    if (hit && !gb && !bb) return t.q === '∃';
+    if (hit) unsureHit = true;
+    unsure ||= gb || bb;
   }
-  return finite(l, t.left, c).elems.every((e) => member(e, rs, c));
+  if (unsureHit || unsure || info.cut) c.track.bounded = true;
+  return unsureHit ? t.q === '∃' : t.q === '∀';
 }
 
 /** All environments for `x : S; y : T` (sequential: T may depend on x). */
-function* bindings(decls: VarDecl[], env: Env, c: Ctx, at: Term): Generator<Env> {
+function* bindings(
+  decls: VarDecl[],
+  env: Env,
+  c: Ctx,
+  at: Term,
+  info: { cut: boolean },
+): Generator<{ env: Env; probe: boolean }> {
   const names = decls.flatMap((d) => d.names.map((n) => ({ name: n.name, decl: d })));
-  function* go(i: number, cur: Map<string, Value>): Generator<Env> {
+  function* go(i: number, cur: Map<string, Value>, probe: boolean): Generator<{ env: Env; probe: boolean }> {
     if (i === names.length) {
-      yield cur;
+      yield { env: cur, probe };
       return;
     }
     const { name, decl } = names[i];
     const s = asSetLike(ev(decl.type, cur, c), decl.type);
-    const elems = enumerate(s, c, true);
-    if (!elems) {
-      const msg = involvesReal(s)
-        ? `Cannot try every value of ${q(printTerm(decl.type))}: real numbers (ℝ) cannot be listed one by one`
-        : `Too many values to check in ${q(printTerm(decl.type))}`;
-      throw new EvalError(msg, at.span, 'too-large');
-    }
-    for (const v of elems) {
+    const L = listFor(s, c, cur);
+    if (!L) throw new EvalError(`Too many values to check in ${q(printTerm(decl.type))}`, at.span, 'too-large');
+    if (L.cut) info.cut = true;
+    for (const it of L.items) {
       const next = new Map(cur);
-      next.set(name, v);
-      yield* go(i + 1, next);
+      next.set(name, it.v);
+      yield* go(i + 1, next, probe || it.probe);
     }
   }
-  yield* go(0, new Map(env));
+  yield* go(0, new Map(env), false);
+}
+
+function subset(l: Value, r: Value, t: Extract<Term, { kind: 'rel' }>, c: Ctx): boolean {
+  const ls = asSetLike(l, t.left);
+  const rs = asSetLike(r, t.right);
+  if (ls.k === 'lazy' && rs.k === 'lazy') {
+    // ℕ₁ ⊆ ℕ ⊆ ℤ, and large ranges inside them (all of these sets are intervals)
+    const rank: Record<string, number> = { nat1: 1, nat: 2, int: 3 };
+    const ld = ls.desc;
+    if (valueEquals(ls, rs)) return true;
+    if (ld.kind in rank && rs.desc.kind in rank) return rank[ld.kind] <= rank[rs.desc.kind];
+    if (ld.kind === 'range' && (rs.desc.kind in rank || rs.desc.kind === 'range')) {
+      return ld.lo > ld.hi || (member(int(ld.lo), rs, c) && member(int(ld.hi), rs, c));
+    }
+    if (ld.kind === 'given' && rs.desc.kind === 'given') return ld.set === rs.desc.set;
+  }
+  const fl = exactFinite(ls, c);
+  if (fl) return fl.elems.every((e) => member(e, rs, c));
+  // an infinite set is never a subset of a finite one
+  if (exactFinite(rs, c) && infiniteSet(ls, c) === true) return false;
+  return listedIn(ls, rs, c);
+}
+
+/**
+ * All listable elements of `a` are in `b`. Listed elements are genuine members of `a`,
+ * so one that is (exactly) not in `b` decides exactly; otherwise a cut list is bounded.
+ */
+function listedIn(a: SetLike, b: SetLike, c: Ctx): boolean {
+  const L = listFor(a, c, new Map());
+  if (!L) {
+    c.track.bounded = true;
+    return true;
+  }
+  let result = true;
+  for (const it of L.items) {
+    const [m, mb] = tracked(c, () => member(it.v, b, c));
+    if (!m && !mb) return false;
+    if (!m) result = false;
+    if (mb) c.track.bounded = true;
+  }
+  if (L.cut) c.track.bounded = true;
+  return result;
 }
 
 // ── sets ───────────────────────────────────────────────────────────────────────
@@ -402,15 +585,28 @@ function member(v: Value, s: SetLike, c: Ctx): boolean {
   const d = s.desc;
   switch (d.kind) {
     case 'nat':
-      return v.k === 'int' && Number.isInteger(v.v) && v.v >= 0;
+      return v.k === 'int' && v.v >= 0;
     case 'nat1':
-      return v.k === 'int' && Number.isInteger(v.v) && v.v >= 1;
+      return v.k === 'int' && v.v >= 1;
     case 'int':
-      return v.k === 'int' && Number.isInteger(v.v);
-    case 'real':
-      return v.k === 'int' && Number.isFinite(v.v);
+      return v.k === 'int';
     case 'range':
-      return v.k === 'int' && Number.isInteger(v.v) && v.v >= d.lo && v.v <= d.hi;
+      return v.k === 'int' && v.v >= d.lo && v.v <= d.hi;
+    case 'given':
+      return v.k === 'atom' && v.set === d.set;
+    case 'approx': {
+      if (d.known.index.has(valueKey(v))) return true;
+      const test = approxMembers.get(s);
+      if (test) {
+        try {
+          return test(v, c);
+        } catch (e) {
+          if (!(e instanceof EvalError)) throw e;
+        }
+      }
+      c.track.bounded = true; // only the listed elements are known
+      return false;
+    }
     case 'cross':
       return v.k === 'tuple' && v.elems.length === d.sets.length && v.elems.every((e, i) => member(e, d.sets[i], c));
     case 'power': {
@@ -445,10 +641,65 @@ function member(v: Value, s: SetLike, c: Ctx): boolean {
 function equal(a: Value, b: Value, c: Ctx): boolean {
   if (a.k !== 'lazy' && b.k !== 'lazy') return valueEquals(a, b);
   if (a.k === 'lazy' && b.k === 'lazy' && valueEquals(a, b)) return true;
-  const fa = a.k === 'lazy' ? exactFinite(a, c) : a;
-  const fb = b.k === 'lazy' ? exactFinite(b, c) : b;
-  if (!fa || !fb) return false; // an infinite set never equals a finite one
-  return valueEquals(fa, fb);
+  if (!isSetLike(a) || !isSetLike(b)) return false;
+  const fa = exactFinite(a, c);
+  const fb = exactFinite(b, c);
+  if (fa && fb) return valueEquals(fa, fb);
+  // a finite set never equals an infinite one
+  const ia = fa ? false : infiniteSet(a, c);
+  const ib = fb ? false : infiniteSet(b, c);
+  if ((ia === true && ib === false) || (ia === false && ib === true)) return false;
+  // otherwise compare what can be listed: an element on one side only decides exactly
+  return listedIn(a, b, c) && listedIn(b, a, c);
+}
+
+/** Is the set infinite? null if unknown. */
+function infiniteSet(s: SetLike, c: Ctx): boolean | null {
+  if (s.k === 'set') return false;
+  const d = s.desc;
+  switch (d.kind) {
+    case 'nat':
+    case 'nat1':
+    case 'int':
+    case 'given':
+      return true;
+    case 'range':
+      return false;
+    case 'approx':
+      return d.infinite ? true : null;
+    case 'power':
+      return infiniteSet(d.base, c);
+    case 'rel':
+    case 'pfun':
+    case 'tfun': {
+      const a = infiniteSet(d.from, c);
+      const b = infiniteSet(d.to, c);
+      if (a === false && b === false) return false;
+      if ((a === true && nonEmpty(d.to)) || (b === true && nonEmpty(d.from))) return true;
+      return null;
+    }
+    case 'cross': {
+      const parts = d.sets.map((x) => infiniteSet(x, c));
+      if (parts.every((p) => p === false)) return false;
+      if (parts.some((p) => p === true) && d.sets.every(nonEmpty)) return true;
+      return null;
+    }
+  }
+}
+
+function nonEmpty(s: SetLike): boolean {
+  if (s.k === 'set') return s.elems.length > 0;
+  const d = s.desc;
+  switch (d.kind) {
+    case 'range':
+      return d.lo <= d.hi;
+    case 'approx':
+      return d.known.elems.length > 0 || d.infinite;
+    case 'cross':
+      return d.sets.every(nonEmpty);
+    default:
+      return true; // ℕ, ℤ, given sets; ℙ S, X ↔ Y, X ⇸ Y contain ∅
+  }
 }
 
 /** Lazy set → finite set if it is finite and small enough, else null. */
@@ -465,26 +716,29 @@ function smallOrLazy(desc: LazyDesc, c: Ctx): Value {
 }
 
 /**
- * List the elements of a set. With `boundedInts`, ℕ / ℕ₁ / ℤ are cut to the
- * universe's [intMin, intMax]; otherwise they count as infinite (→ null).
- * ℝ can never be listed. Returns null if the set has more than `c.limit` elements.
+ * List the elements of a set. With `bounded`, ℕ / ℕ₁ / ℤ are cut to the universe's
+ * [intMin, intMax], infinite given sets to their carrier and approx sets to their
+ * known elements; otherwise these count as unlistable (→ null).
+ * Returns null if the set has more than `c.limit` elements.
  */
-function enumerate(s: SetLike, c: Ctx, boundedInts: boolean): Value[] | null {
+function enumerate(s: SetLike, c: Ctx, bounded: boolean): Value[] | null {
   if (s.k === 'set') return s.elems.length <= c.limit ? [...s.elems] : null;
   const d = s.desc;
   const { intMin, intMax } = c.u;
-  const sub = (x: SetLike) => enumerate(x, c, boundedInts);
+  const sub = (x: SetLike) => enumerate(x, c, bounded);
   switch (d.kind) {
     case 'nat':
-      return boundedInts ? intRange(Math.max(0, intMin), intMax, c) : null;
+      return bounded ? intRange(Math.max(0, intMin), intMax, c) : null;
     case 'nat1':
-      return boundedInts ? intRange(Math.max(1, intMin), intMax, c) : null;
+      return bounded ? intRange(Math.max(1, intMin), intMax, c) : null;
     case 'int':
-      return boundedInts ? intRange(intMin, intMax, c) : null;
-    case 'real':
-      return null;
+      return bounded ? intRange(intMin, intMax, c) : null;
     case 'range':
       return intRange(d.lo, d.hi, c);
+    case 'given':
+      return bounded ? [...d.sample.elems] : null;
+    case 'approx':
+      return bounded ? d.known.elems.filter((e) => !containsFresh(e)) : null;
     case 'cross': {
       const parts = d.sets.map(sub);
       if (parts.some((p) => p === null)) return null;
@@ -524,6 +778,84 @@ function enumerate(s: SetLike, c: Ctx, boundedInts: boolean): Value[] | null {
   }
 }
 
+interface Listing {
+  /** `probe`: a number beyond the window (errors while trying it are ignored). */
+  items: { v: Value; probe: boolean }[];
+  /** The list is not the whole set. */
+  cut: boolean;
+}
+
+/** The values a quantifier or comprehension tries for a variable declared `x : s`. */
+function listFor(s: SetLike, c: Ctx, env: Env): Listing | null {
+  const plain = (vs: readonly Value[], cut: boolean): Listing => ({ items: vs.map((v) => ({ v, probe: false })), cut });
+  if (s.k === 'set') return s.elems.length <= c.limit ? plain(s.elems, false) : null;
+  const d = s.desc;
+  switch (d.kind) {
+    case 'given': {
+      // exact: the carrier, the generic atoms already in use, and one new generic atom
+      const used = freshAtomsIn(env, d.set);
+      return plain([...d.sample.elems, ...used, freshAtom(d.set, used.length + 1)], false);
+    }
+    case 'nat':
+    case 'nat1':
+    case 'int': {
+      const lo = d.kind === 'nat' ? 0 : d.kind === 'nat1' ? 1 : -Infinity;
+      const window = intRange(Math.max(lo, c.u.intMin), c.u.intMax, c);
+      if (!window) return null;
+      const extra = probeNumbers(c, lo, Infinity).map((n) => ({ v: int(n), probe: true }));
+      return { items: [...plain(window, true).items, ...extra], cut: true };
+    }
+    case 'range': {
+      const all = intRange(d.lo, d.hi, c);
+      if (all) return plain(all, false);
+      const window = intRange(Math.max(d.lo, c.u.intMin), Math.min(d.hi, c.u.intMax), c) ?? [];
+      const extra = [d.lo, d.hi, ...probeNumbers(c, d.lo, d.hi)].filter((n) => n < c.u.intMin || n > c.u.intMax);
+      return { items: [...plain(window, true).items, ...[...new Set(extra)].map((n) => ({ v: int(n), probe: true }))], cut: true };
+    }
+    case 'approx':
+      return plain(d.known.elems, true);
+    default: {
+      const exact = enumerate(s, c, false);
+      if (exact) return plain(exact, false);
+      const some = enumerate(s, c, true);
+      return some ? plain(some, true) : null;
+    }
+  }
+}
+
+/** Numbers beyond the window [intMin, intMax] (inside [lo, hi]) worth trying. */
+function probeNumbers(c: Ctx, lo: number, hi: number): number[] {
+  const { intMin, intMax } = c.u;
+  const cands = [intMax + 1, intMax + 2, ...PROBES, intMin - 1, ...PROBES.map((n) => -n), ...(c.u.probes ?? [])];
+  const out = new Set<number>();
+  for (const n of cands) if (Number.isSafeInteger(n) && n >= lo && n <= hi && (n < intMin || n > intMax)) out.add(n);
+  return [...out];
+}
+
+const freshCache = new Map<string, AtomValue>();
+/** The i-th generic element of an infinite given set ("another DATE"). */
+function freshAtom(set: string, i: number): AtomValue {
+  const name = i === 1 ? `another ${set}` : `another ${set} (${i})`;
+  let a = freshCache.get(`${set}\u0000${name}`);
+  if (!a) {
+    a = { k: 'atom', set, name, fresh: true };
+    freshCache.set(`${set}\u0000${name}`, a);
+  }
+  return a;
+}
+
+/** Distinct generic atoms of `set` in the values of `env`. */
+function freshAtomsIn(env: Env, set: string): AtomValue[] {
+  const found = new Map<string, AtomValue>();
+  const scan = (v: Value) => {
+    if (v.k === 'atom') {
+      if (v.fresh && v.set === set) found.set(v.name, v);
+    } else if (v.k === 'tuple' || v.k === 'set') v.elems.forEach(scan);
+  };
+  for (const v of env.values()) scan(v);
+  return [...found.values()];
+}
+
 function intRange(lo: number, hi: number, c: Ctx): Value[] | null {
   if (hi < lo) return [];
   if (hi - lo + 1 > c.limit) return null;
@@ -561,45 +893,31 @@ function asSetLike(v: Value, at: Term): SetLike {
   return v;
 }
 
-/** A finite set, materialising lazy sets when possible. */
+/**
+ * A finite set, materialising lazy sets when possible. An infinite given set gives its
+ * example carrier and an approx set its known elements; both make the result bounded.
+ */
 function finite(v: Value, at: Term, c: Ctx): SetValue {
   const s = asSetLike(v, at);
   if (s.k === 'set') return s;
   const f = exactFinite(s, c);
-  if (!f) {
-    const msg = involvesReal(s)
-      ? `${q(printTerm(at))} cannot be listed — there are infinitely many real numbers`
-      : `${q(printTerm(at))} is too large to compute with`;
-    throw new EvalError(msg, at.span, 'too-large');
+  if (f) return f;
+  if (s.desc.kind === 'given') {
+    c.track.bounded = true;
+    return s.desc.sample;
   }
-  return f;
+  if (s.desc.kind === 'approx') {
+    c.track.bounded = true;
+    return mkSet(s.desc.known.elems.filter((e) => !containsFresh(e)));
+  }
+  throw new EvalError(`${q(printTerm(at))} is too large to compute with`, at.span, 'too-large');
 }
 
-/** Does a lazy set involve ℝ (so it can never be listed)? */
-function involvesReal(s: SetLike): boolean {
-  if (s.k === 'set') return false;
-  const d = s.desc;
-  switch (d.kind) {
-    case 'real':
-      return true;
-    case 'power':
-      return involvesReal(d.base);
-    case 'rel':
-    case 'pfun':
-    case 'tfun':
-      return involvesReal(d.from) || involvesReal(d.to);
-    case 'cross':
-      return d.sets.some(involvesReal);
-    default:
-      return false;
-  }
-}
-
-function pairsOf(s: SetValue, at: Term): (Value & { k: 'tuple' })[] {
+function pairsOf(s: SetValue, at: Term): TupleValue[] {
   for (const e of s.elems) {
     if (!isPair(e)) throw new EvalError(`${q(printTerm(at))} is not a relation (its elements are not pairs)`, at.span);
   }
-  return s.elems as (Value & { k: 'tuple' })[];
+  return s.elems as TupleValue[];
 }
 
 /** Sort helper for callers that build value lists. */

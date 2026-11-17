@@ -4,6 +4,13 @@
   "short": "Railway Signalling",
   "icon": "train-front",
   "description": "Signals protect the blocks of a railway line from collisions.",
+  "card": [
+    "The line is divided into blocks, and only one train may be in a block at a time.",
+    "Signals at the entrance of each block show red or green.",
+    "A signal may only show green if the block behind it is empty.",
+    "The interlocking tracks the trains and refuses unsafe green signals."
+  ],
+  "typesPrompt": "The line has trains, blocks of track and signals.",
   "requirements": [
     { "id": "R1", "text": "At most one train may be in a block at any time." },
     { "id": "R2", "text": "Each signal protects the entry into one block and shows either red or green." },
@@ -18,10 +25,57 @@
     { "name": "BLOCK", "values": ["B1", "B2", "B3", "B4", "B5", "B6"] },
     { "name": "SIGNAL", "values": ["S1", "S2", "S3", "S4", "S5", "S6"] }
   ],
+  "typeOptions": [
+    { "name": "STATION", "values": ["Konstanz", "Radolfzell", "Singen", "Engen", "Basel", "Schaffhausen"] },
+    { "name": "DRIVER", "values": ["Ada", "Bo", "Cem", "Dina", "Eli", "Fay"], "infinite": true }
+  ],
   "fixedValues": { "protects": "{S1 ↦ B2, S2 ↦ B3, S3 ↦ B4, S4 ↦ B3, S5 ↦ B2, S6 ↦ B1}" },
+  "goals": {
+    "types": [
+      { "text": "A type for trains", "check": { "given": "TRAIN" } },
+      { "text": "A type for blocks of track", "check": { "given": "BLOCK" } },
+      { "text": "A type for signals", "check": { "given": "SIGNAL" } }
+    ],
+    "state": [
+      { "text": "Which block each train is in", "check": { "var": "at" } },
+      { "text": "Which block each signal leads into", "check": { "var": "protects" } },
+      { "text": "Which signals show green", "check": { "var": "green" } },
+      {
+        "text": "Never two trains in the same block",
+        "check": { "holds": "∀ t₁, t₂ : dom at • at(t₁) = at(t₂) ⇒ t₁ = t₂" }
+      },
+      {
+        "text": "Green only into a free block, never two greens into one block",
+        "check": { "holds": "(∀ s : green • protects(s) ∉ ran at) ∧ (∀ s₁, s₂ : green • protects(s₁) = protects(s₂) ⇒ s₁ = s₂)" }
+      }
+    ],
+    "init": [
+      { "text": "No trains on the line at the start", "check": { "holds": "at = ∅" } },
+      { "text": "All signals start red", "check": { "holds": "green = ∅" } }
+    ],
+    "ops": {
+      "LocateTrain": [
+        { "text": "Take a train as input and output a block", "check": { "var": ["t?", "b!"] } },
+        { "text": "Only for trains on the line", "check": { "holds": "t? ∈ dom at" } },
+        { "text": "Output the block the train is in", "check": { "holds": "(t? ↦ b!) ∈ at" } },
+        { "text": "Don't change anything", "check": { "holds": "at′ = at ∧ protects′ = protects ∧ green′ = green" } }
+      ],
+      "ClearSignal": [
+        { "text": "Take a signal as input", "check": { "var": "s?" } },
+        { "text": "Only if the block ahead is free", "check": { "holds": "protects(s?) ∉ ran at" } },
+        {
+          "text": "Only if no other green signal leads into that block",
+          "check": { "holds": "∀ g : green • g ≠ s? ⇒ protects(g) ≠ protects(s?)" }
+        },
+        { "text": "Turn the signal green", "check": { "holds": "green′ = green ∪ {s?}" } },
+        { "text": "Leave the trains and the layout unchanged", "check": { "holds": "at′ = at ∧ protects′ = protects" } }
+      ]
+    }
+  },
   "state": {
+    "invariantPrompt": "A signal may only show green if the block it protects is free.",
     "name": "Interlocking",
-    "prompt": "A signal may only show green if the block it protects is free.",
+    "prompt": "Train positions, the signal layout and green signals. Green means the block ahead is free.",
     "declarations": [
       { "text": "at : TRAIN ⇸ BLOCK", "requirements": ["R1"] },
       { "text": "protects : SIGNAL → BLOCK", "requirements": ["R2"] },
@@ -35,7 +89,7 @@
   },
   "init": {
     "name": "InitInterlocking",
-    "prompt": "At the start, all signals show red.",
+    "prompt": "At the start, the line is empty and all signals are red.",
     "declarations": [
       { "text": "Interlocking", "requirements": [] }
     ],
@@ -48,7 +102,7 @@
     {
       "name": "LocateTrain",
       "kind": "query",
-      "prompt": "Output the block the train is in.",
+      "prompt": "Show which block a given train is in.",
       "declarations": [
         { "text": "ΞInterlocking", "requirements": [] },
         { "text": "t? : TRAIN", "requirements": ["R6"] },
@@ -62,7 +116,7 @@
     {
       "name": "ClearSignal",
       "kind": "update",
-      "prompt": "Turn the signal green, but only if the block it protects is free.",
+      "prompt": "Turn a signal green, but only if the block ahead is free.",
       "declarations": [
         { "text": "ΔInterlocking", "requirements": [] },
         { "text": "s? : SIGNAL", "requirements": ["R7"] }

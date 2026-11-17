@@ -4,6 +4,13 @@
   "short": "Bank Accounts",
   "icon": "landmark",
   "description": "Customer accounts with balances and overdraft limits.",
+  "card": [
+    "Each account has an owner, a balance and an overdraft limit.",
+    "The limit says how far the balance may drop below zero.",
+    "A withdrawal that would go past the limit has to be refused.",
+    "Only the owner may see an account's balance."
+  ],
+  "typesPrompt": "The bank deals with accounts and customers.",
   "requirements": [
     { "id": "R1", "text": "Each open account has one owner, a balance and a non-negative overdraft limit (in euros)." },
     { "id": "R2", "text": "No account may be overdrawn by more than its overdraft limit." },
@@ -12,12 +19,71 @@
     { "id": "R5", "text": "The owner of an account can withdraw a positive amount from it." }
   ],
   "givenSets": [
-    { "name": "ACCOUNT", "values": ["DE4711", "DE0815", "DE1234", "DE2024", "DE3141", "DE2718", "DE1001", "DE9999"], "infinite": true },
+    {
+      "name": "ACCOUNT",
+      "values": ["DE4711", "DE0815", "DE1234", "DE2024", "DE3141", "DE2718", "DE1001", "DE9999"],
+      "infinite": true
+    },
     { "name": "CUSTOMER", "values": ["Mia", "Noah", "Lea", "Paul", "Emma", "Jonas", "Hanna", "Luis"], "infinite": true }
   ],
+  "typeOptions": [
+    { "name": "BRANCH", "values": ["Konstanz", "Zurich", "Munich", "Berlin", "Vienna", "Basel"], "infinite": true },
+    { "name": "CURRENCY", "values": ["EUR", "CHF", "USD", "GBP", "JPY", "SEK"] },
+    {
+      "name": "DATE",
+      "values": ["2.Feb", "17.Apr", "8.Jun", "23.Jul", "5.Sep", "11.Nov", "29.Jan", "14.Mar"],
+      "infinite": true
+    }
+  ],
+  "goals": {
+    "types": [
+      { "text": "A type for accounts", "check": { "given": "ACCOUNT" } },
+      { "text": "A type for customers", "check": { "given": "CUSTOMER" } }
+    ],
+    "state": [
+      { "text": "Who owns each account", "check": { "var": "owner" } },
+      { "text": "The balance of each account", "check": { "var": "balance" } },
+      { "text": "The overdraft limit of each account", "check": { "var": "overdraft" } },
+      {
+        "text": "Every open account has a balance and a limit",
+        "check": { "holds": "dom balance = dom owner ∧ dom overdraft = dom owner" }
+      },
+      {
+        "text": "No account is overdrawn beyond its limit",
+        "check": { "holds": "∀ a : dom balance • balance(a) ≥ -overdraft(a)" }
+      }
+    ],
+    "init": [
+      { "text": "No open accounts at the start", "check": { "holds": "owner = ∅" } },
+      { "text": "No balances or limits at the start", "check": { "holds": "balance = ∅ ∧ overdraft = ∅" } }
+    ],
+    "ops": {
+      "QueryBalance": [
+        { "text": "Take a customer and an account, output a balance", "check": { "var": ["c?", "a?", "b!"] } },
+        { "text": "Only for open accounts", "check": { "holds": "a? ∈ dom owner" } },
+        { "text": "Only the owner may ask", "check": { "holds": "(a? ↦ c?) ∈ owner" } },
+        { "text": "Output the account's balance", "check": { "holds": "(a? ↦ b!) ∈ balance" } },
+        {
+          "text": "Don't change anything",
+          "check": { "holds": "owner′ = owner ∧ balance′ = balance ∧ overdraft′ = overdraft" }
+        }
+      ],
+      "Withdraw": [
+        { "text": "Take a customer, an account and an amount as inputs", "check": { "var": ["c?", "a?", "amount?"] } },
+        { "text": "Only the owner may withdraw", "check": { "holds": "(a? ↦ c?) ∈ owner" } },
+        { "text": "Stay within the overdraft limit", "check": { "holds": "balance(a?) - amount? ≥ -overdraft(a?)" } },
+        {
+          "text": "Take the amount off the balance",
+          "check": { "holds": "balance′ = (balance ∖ {a? ↦ balance(a?)}) ∪ {a? ↦ balance(a?) - amount?}" }
+        },
+        { "text": "Leave owners and limits unchanged", "check": { "holds": "owner′ = owner ∧ overdraft′ = overdraft" } }
+      ]
+    }
+  },
   "state": {
+    "invariantPrompt": "No account may be overdrawn beyond its overdraft limit.",
     "name": "Bank",
-    "prompt": "No account may be overdrawn beyond its limit.",
+    "prompt": "Each account's owner, balance and overdraft limit. No account may be overdrawn beyond its limit.",
     "declarations": [
       { "text": "owner : ACCOUNT ⇸ CUSTOMER", "requirements": ["R1"] },
       { "text": "balance : ACCOUNT ⇸ ℤ", "requirements": ["R1"] },
@@ -43,7 +109,7 @@
     {
       "name": "QueryBalance",
       "kind": "query",
-      "prompt": "Only the account's owner may see its balance.",
+      "prompt": "Show an account's balance, but only to its owner.",
       "declarations": [
         { "text": "ΞBank", "requirements": [] },
         { "text": "c? : CUSTOMER", "requirements": ["R4"] },
@@ -59,7 +125,7 @@
     {
       "name": "Withdraw",
       "kind": "update",
-      "prompt": "The withdrawal must stay within the overdraft limit.",
+      "prompt": "Let the owner withdraw money, but never beyond the overdraft limit.",
       "declarations": [
         { "text": "ΔBank", "requirements": [] },
         { "text": "c? : CUSTOMER", "requirements": ["R5"] },

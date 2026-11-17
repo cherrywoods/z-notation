@@ -1,11 +1,10 @@
 // Runtime values for evaluating Z over finite example universes.
 //
 //   atoms    elements of given sets ('Dune' ∈ BOOK, '2.Feb' ∈ DATE)
-//   numbers  whole numbers and decimals (one kind, like the single numeric type of the
-//            type checker; `k: 'int'` for historical reasons)
+//   ints     whole numbers
 //   tuples   (a, b, …) — a maplet a ↦ b is the pair (a, b)
 //   sets     finite sets with a canonical element order and O(1) membership
-//   lazy     sets that are infinite or too large to list (ℕ, ℝ, ℙ BOOK, BOOK ⇸ MEMBER, …);
+//   lazy     sets that are infinite or too large to list (ℕ, ℙ BOOK, BOOK ⇸ MEMBER, …);
 //            they support exact membership tests and are enumerated only on demand
 //            (see eval.ts).
 
@@ -17,8 +16,13 @@ export interface AtomValue {
   name: string;
   /** Position in the example carrier; only used for ordering (pool order). */
   ord?: number;
+  /**
+   * A generic element of an infinite given set that is not in the example carrier
+   * ("another DATE"). The evaluator uses it to stand for all such elements at once.
+   */
+  fresh?: true;
 }
-/** A number: whole (ℕ, ℤ) or a decimal (ℝ). Build it with `int()`, which normalises it. */
+/** A whole number. */
 export interface IntValue {
   k: 'int';
   v: number;
@@ -38,11 +42,18 @@ export type LazyDesc =
   | { kind: 'nat' } // ℕ
   | { kind: 'nat1' } // ℕ₁
   | { kind: 'int' } // ℤ
-  | { kind: 'real' } // ℝ (any finite number)
   | { kind: 'range'; lo: number; hi: number } // lo .. hi (large)
   | { kind: 'power'; base: SetLike } // ℙ S
   | { kind: 'rel' | 'pfun' | 'tfun'; from: SetLike; to: SetLike } // X ↔ Y, X ⇸ Y, X → Y
-  | { kind: 'cross'; sets: SetLike[] }; // X × Y (large)
+  | { kind: 'cross'; sets: SetLike[] } // X × Y (large)
+  /** A given set that is infinite in principle; `sample` are its example elements. */
+  | { kind: 'given'; set: string; sample: SetValue }
+  /**
+   * A set from a comprehension over an infinite set (ℕ, ℤ, an infinite given set) that
+   * could not be listed completely. `known` are elements found (all genuine members);
+   * `infinite`: the set is known to be infinite. `id` identifies the set.
+   */
+  | { kind: 'approx'; id: number; known: SetValue; infinite: boolean };
 export interface LazySetValue {
   k: 'lazy';
   desc: LazyDesc;
@@ -54,24 +65,12 @@ export type Value = AtomValue | IntValue | TupleValue | SetValue | LazySetValue;
 
 export const atom = (set: string, name: string, ord?: number): AtomValue =>
   ord === undefined ? { k: 'atom', set, name } : { k: 'atom', set, name, ord };
-/**
- * A number value. Decimals are rounded to 15 significant digits, which removes binary
- * rounding noise (0.1 + 0.2 = 0.3, not 0.30000000000000004) so that equal-looking
- * numbers are equal values with equal keys.
- */
-export const int = (v: number): IntValue => ({ k: 'int', v: normalizeNumber(v) });
-/** Same as `int`; reads better for decimals. */
-export const num = int;
-
-export function normalizeNumber(v: number): number {
-  if (Number.isInteger(v)) return v === 0 ? 0 : v; // also turns -0 into 0
-  if (!Number.isFinite(v)) return v;
-  return Number(v.toPrecision(15));
-}
+/** A number value (-0 becomes 0, so that equal numbers have equal keys). */
+export const int = (v: number): IntValue => ({ k: 'int', v: v === 0 ? 0 : v });
 
 /**
- * A number as Z text: shortest exact decimal form, never exponent notation
- * (1e-7 → 0.0000001), so that printed literals parse back to the same number.
+ * A number as Z text, never in exponent notation (1e21 → 1000000000000000000000), so
+ * that printed literals parse back to the same number.
  */
 export function formatNumber(n: number): string {
   if (Object.is(n, -0)) return '0';
@@ -142,7 +141,6 @@ function lazyKey(d: LazyDesc): string {
     case 'nat':
     case 'nat1':
     case 'int':
-    case 'real':
       return d.kind;
     case 'range':
       return `range(${d.lo},${d.hi})`;
@@ -154,6 +152,10 @@ function lazyKey(d: LazyDesc): string {
       return `${d.kind}(${valueKey(d.from)},${valueKey(d.to)})`;
     case 'cross':
       return `cross(${d.sets.map(valueKey).join(',')})`;
+    case 'given':
+      return `given(${d.set})`;
+    case 'approx':
+      return `approx(${d.id})`;
   }
 }
 
@@ -245,8 +247,6 @@ function printLazy(d: LazyDesc, min: number): string {
       return 'ℕ₁';
     case 'int':
       return 'ℤ';
-    case 'real':
-      return 'ℝ';
     case 'range':
       return wrap(2, `${formatNumber(d.lo)} .. ${formatNumber(d.hi)}`);
     case 'power':
@@ -259,5 +259,24 @@ function printLazy(d: LazyDesc, min: number): string {
     }
     case 'cross':
       return wrap(2, d.sets.map((s) => sub(s, 3)).join(' × '));
+    case 'given':
+      return d.set;
+    case 'approx': {
+      const shown = d.known.elems.filter((e) => !containsFresh(e)).map(printElem);
+      return `{${[...shown, '…'].join(', ')}}`;
+    }
+  }
+}
+
+/** Does a value contain a generic atom ("another DATE")? */
+export function containsFresh(v: Value): boolean {
+  switch (v.k) {
+    case 'atom':
+      return !!v.fresh;
+    case 'tuple':
+    case 'set':
+      return v.elems.some(containsFresh);
+    default:
+      return false;
   }
 }

@@ -29,6 +29,8 @@ interface TemplateLine {
   hidden?: boolean;
 }
 interface TemplateSchema {
+  /** State only: placeholder for the empty predicate part (the key safety property). */
+  invariantPrompt?: string;
   name: string;
   kind?: OpKind;
   prompt?: string;
@@ -42,6 +44,8 @@ interface Template {
   icon?: string;
   blurb?: string;
   description?: string;
+  /** The System step's bullet points (context for students), about four short sentences. */
+  card?: string[] | string;
   typesPrompt?: string;
   requirements?: { id: string; text: string }[];
   givenSets?: { name: string; values?: string[]; comment?: string; hidden?: boolean; infinite?: boolean }[];
@@ -50,6 +54,28 @@ interface Template {
   operations?: TemplateSchema[];
   /** Z set displays for fixed-data state variables, e.g. { maxDose: '{aspirin ↦ 4000, …}' }. */
   fixedValues?: Record<string, string>;
+  /** Further given sets offered in the Types tool bar (besides givenSets). */
+  typeOptions?: { name: string; values?: string[]; infinite?: boolean }[];
+  /** Step goals (docs/design.md "Step goals"). */
+  goals?: TemplateGoals;
+}
+
+/** How a goal is checked (names refer to the template's reference spec). */
+export interface GoalCheck {
+  given?: string;
+  var?: string | string[];
+  holds?: string;
+}
+export interface Goal {
+  text: string;
+  check: GoalCheck;
+}
+/** Goals per step: Types, State, Init, and operations by their template name. */
+export interface TemplateGoals {
+  types?: Goal[];
+  state?: Goal[];
+  init?: Goal[];
+  ops?: Record<string, Goal[]>;
 }
 
 /** Stable order on the start page; unknown ids follow alphabetically. */
@@ -122,6 +148,70 @@ export function topicName(id: string): string | undefined {
   return TOPICS.find((t) => t.id === id)?.short;
 }
 
+/** The step goals of a template topic (undefined for the own topic). */
+export function goalsOf(id: string): TemplateGoals | undefined {
+  return TEMPLATES.get(id)?.goals;
+}
+
+/** Operation id (as createSpec assigns them) → the template's operation name. */
+function opNames(t: Template): Map<string, string> {
+  const ids = new Map<string, string>();
+  for (const op of t.operations ?? []) {
+    let id = `op-${slug(op.name) || 'operation'}`;
+    for (let n = 2; ids.has(id); n++) id = `op-${slug(op.name)}-${n}`;
+    ids.set(id, op.name);
+  }
+  return ids;
+}
+
+/** The goals of one step ('types', 'state', 'init' or an operation id); [] if none. */
+export function stepGoalsOf(topicId: string, stepId: string): Goal[] {
+  const t = TEMPLATES.get(topicId);
+  const g = t?.goals;
+  if (!t || !g) return [];
+  if (stepId === 'types' || stepId === 'state' || stepId === 'init') return g[stepId] ?? [];
+  const name = opNames(t).get(stepId);
+  return (name && g.ops?.[name]) || [];
+}
+
+/**
+ * The template's reference spec: all lines, hidden ones included, with the same
+ * operation ids as createSpec. Goals are checked against it.
+ */
+export function referenceSpecOf(topicId: string): SpecDoc | undefined {
+  if (!REFERENCES.has(topicId)) REFERENCES.set(topicId, buildReference(topicId));
+  return REFERENCES.get(topicId);
+}
+const REFERENCES = new Map<string, SpecDoc | undefined>();
+
+function buildReference(topicId: string): SpecDoc | undefined {
+  const t = TEMPLATES.get(topicId);
+  if (!t) return undefined;
+  const spec = fromTemplate(topicId, t);
+  const all = (lines?: TemplateLine[]) => (lines ?? []).map((l) => l.text).join('\n');
+  const fill = (doc: SchemaDoc, s: TemplateSchema) => {
+    doc.decls = all(s.declarations);
+    doc.preds = all(s.predicates);
+  };
+  spec.given = `[${(t.givenSets ?? []).map((g) => g.name).join(', ')}]`;
+  fill(spec.state, t.state);
+  if (spec.init && t.init) fill(spec.init, t.init);
+  (t.operations ?? []).forEach((op, i) => fill(spec.operations[i], op));
+  return spec;
+}
+
+/** The System step's bullet points of a template topic ([] for the own topic). */
+export function cardOf(id: string): string[] {
+  const card = TEMPLATES.get(id)?.card;
+  const items = Array.isArray(card) ? card : typeof card === 'string' ? [card] : [];
+  return items.map((s) => s.trim()).filter(Boolean);
+}
+
+/** Lucide icon name of a topic (the own topic: its bubble's icon). */
+export function iconOf(id: string): string {
+  return id === CUSTOM_ID ? CUSTOM_TOPIC.icon : (TOPICS.find((t) => t.id === id)?.icon ?? 'box');
+}
+
 /** Title of a topic for display (custom topics carry their own title in the SpecDoc). */
 export function topicTitle(id: string): string | undefined {
   return TEMPLATES.get(id)?.title;
@@ -138,22 +228,20 @@ export function createSpec(topicId: string, customTitle?: string): SpecDoc {
 }
 
 function fromTemplate(topicId: string, t: Template): SpecDoc {
-  const reqText = new Map((t.requirements ?? []).map((r) => [r.id, r.text]));
-  const given = (t.givenSets ?? []).filter((g) => !g.hidden).map((g) => g.name);
+  // Students start bare: an empty Types line and schemas with only their names.
+  // The template's lines are the reference spec (used by tests), never shown.
   const pools: Record<string, string[]> = {};
   for (const g of t.givenSets ?? []) if (g.values?.length) pools[g.name] = [...g.values];
 
   const schema = (s: TemplateSchema, id: string, role: SchemaRole): SchemaDoc => {
-    const lines = [...(s.declarations ?? []), ...(s.predicates ?? [])];
     const doc: SchemaDoc = {
       id,
       role,
       name: s.name,
-      decls: visibleText(s.declarations),
-      preds: visibleText(s.predicates),
+      decls: '',
+      preds: '',
     };
-    const prompt = s.prompt?.trim() || hiddenPrompt(lines, reqText);
-    if (prompt) doc.prompt = prompt;
+    // the editors show generic prompts; the template's prompt texts are not used
     if (role === 'operation') doc.opKind = s.kind === 'query' ? 'query' : 'update';
     return doc;
   };
@@ -169,7 +257,7 @@ function fromTemplate(topicId: string, t: Template): SpecDoc {
   const spec: SpecDoc = {
     topicId,
     title: t.title,
-    given: given.length ? `[${given.join(', ')}]` : '',
+    given: '[]',
     pools,
     state: schema(t.state, 'state', 'state'),
     init: t.init ? schema(t.init, 'init', 'init') : null,
@@ -182,23 +270,6 @@ function fromTemplate(topicId: string, t: Template): SpecDoc {
   return spec;
 }
 
-function visibleText(lines: TemplateLine[] | undefined): string {
-  return (lines ?? [])
-    .filter((l) => !l.hidden)
-    .map((l) => l.text)
-    .join('\n');
-}
-
-/** Prompt from the requirements of hidden lines (each requirement once, in order). */
-function hiddenPrompt(lines: TemplateLine[], reqText: Map<string, string>): string {
-  const ids: string[] = [];
-  for (const l of lines)
-    if (l.hidden) for (const r of l.requirements ?? []) if (!ids.includes(r)) ids.push(r);
-  return ids
-    .map((id) => reqText.get(id))
-    .filter((x): x is string => !!x)
-    .join(' ');
-}
 
 // ── own topic ────────────────────────────────────────────────────────────────
 
@@ -211,12 +282,12 @@ function customSpec(title: string): SpecDoc {
   return {
     topicId: CUSTOM_ID,
     title,
-    given: '',
+    given: '[]',
     typesPrompt: 'Which kinds of things does your system deal with?',
     pools: defaultPools(),
     infinite: DEFAULT_SETS.filter((d) => d.infinite).map((d) => d.name),
     state: { id: 'state', role: 'state', name: stateName, decls: '', preds: '' },
-    init: null,
+    init: { id: 'init', role: 'init', name: `Init${stateName}`, decls: '', preds: '' },
     operations: [
       {
         id: 'op-query',
@@ -260,4 +331,17 @@ export function pascalCase(s: string): string {
     .map((w) => w[0].toUpperCase() + w.slice(1))
     .join('');
   return out.replace(/^[0-9]+/, '');
+}
+
+/**
+ * Given sets offered in the Types step's tool bar: a template's own sets plus a few
+ * related ones (computed from the template, so older saved specs get them too).
+ * Undefined for the own topic (which offers the generic NAME, DATE, …).
+ */
+export function typeOptionsOf(topicId: string): { name: string; values: string[]; infinite: boolean }[] | undefined {
+  const t = TEMPLATES.get(topicId);
+  if (!t) return undefined;
+  return [...(t.givenSets ?? []), ...(t.typeOptions ?? [])]
+    .filter((g, i, all) => all.findIndex((o) => o.name === g.name) === i)
+    .map((g) => ({ name: g.name, values: [...(g.values ?? [])], infinite: !!g.infinite }));
 }

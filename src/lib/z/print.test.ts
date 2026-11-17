@@ -57,10 +57,8 @@ describe('printTerm', () => {
     ['∀ x, y : S; z : T | x ≠ y • z ∈ U', '∀ x, y : S; z : T | x ≠ y • z ∈ U'],
     ['¬ ∃ x : S • P', '¬ (∃ x : S • P)'],
     ['1..10', '1 .. 10'],
-    ['t∈ℝ', 't ∈ ℝ'],
-    ['x = 0.25 + -1.5', 'x = 0.25 + -1.5'],
-    ['x = 36.50', 'x = 36.5'],
-    ['-(0.5)', '-(0.5)'],
+    ['x = 25 + -15', 'x = 25 + -15'],
+    ['-(5)', '-(5)'],
     ['true ∨ false', 'true ∨ false'],
   ])('%s  ⟶  %s', (src, expected) => expect(canon(src)).toBe(expected));
 
@@ -110,16 +108,16 @@ describe('round trip: parse(print(t)) ≅ t', () => {
 });
 
 describe('numbers', () => {
-  it('prints decimals exactly, never in exponent notation', () => {
+  it('prints numbers without exponent notation', () => {
     const num = (value: number): Term => ({ kind: 'num', value, span: { from: 0, to: 0 } });
-    for (const v of [0.25, -1.5, 36.5, 0.1 + 0.2, 1e-7, -1.25e-7, 1.5e22, 1e21, 123456.789, 2 ** 53]) {
+    for (const v of [0, -7, 2 ** 53 - 1, -(2 ** 53 - 1)]) {
       const text = printTerm(num(v));
-      expect(text, String(v)).not.toMatch(/e/);
       const back = parseTerm(text).term!;
       expect(back.kind === 'num' && back.value, text).toBe(v);
     }
-    expect(printTerm(num(1e-7))).toBe('0.0000001');
+    // (computed values can be larger than literals may be)
     expect(printTerm(num(1.5e22))).toBe('15000000000000000000000');
+    expect(printTerm(num(1e21))).toBe('1000000000000000000000');
   });
 });
 
@@ -193,9 +191,8 @@ function randomExpr(r: () => number, depth: number): Term {
   if (depth <= 0 || r() < 0.25) {
     const k = r();
     if (k < 0.6) return nameTerm(pick(NAMES));
-    if (k < 0.7) return { kind: 'num', value: Math.floor(r() * 7) - 3, span: S0 };
-    if (k < 0.75) return { kind: 'num', value: pick([0.25, -1.5, 36.5, 0.1, -0.05]), span: S0 };
-    if (k < 0.85) return { kind: 'builtinSet', set: pick(['ℕ', 'ℕ₁', 'ℤ', 'ℝ'] as const), span: S0 };
+    if (k < 0.75) return { kind: 'num', value: Math.floor(r() * 7) - 3, span: S0 };
+    if (k < 0.85) return { kind: 'builtinSet', set: pick(['ℕ', 'ℕ₁', 'ℤ'] as const), span: S0 };
     return { kind: 'emptyset', span: S0 };
   }
   const d = depth - 1;

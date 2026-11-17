@@ -154,3 +154,48 @@ is the state schema name.
 * Very little UI text, English.
 * Diagnostics use `ZDiagnostic` (model.ts) with offsets relative to the section text.
 * Tests: vitest, files `src/**/*.test.ts` (`npm test`).
+
+## Step goals (lecturer request, 2026-11-17)
+
+The schema boxes show only generic prompts (State: "Add state variables" / "Add
+invariants"; operations: "Import the state", "Add inputs and outputs" / "Add
+preconditions", "Add postconditions"; Init: "Import the state" / "Add initial values").
+The system-specific guidance is a short list of **goals** below the step's top prompt.
+Each goal has a status dot that turns green automatically once the student's spec
+achieves it. Goals are checked **independently of variable names**.
+
+Template format (`templates/<id>.json`, top level):
+
+```jsonc
+"goals": {
+  "types": [{ "text": "A type for patients", "check": { "given": "PATIENT" } }],
+  "state": [
+    { "text": "Which patients are on the ward", "check": { "var": "patients" } },
+    { "text": "Nobody gets a drug they are allergic to", "check": { "holds": "prescribed ∩ allergic = ∅" } }
+  ],
+  "init": [{ "text": "The ward starts empty", "check": { "holds": "patients = ∅" } }],
+  "ops": {
+    "Prescribe": [
+      { "text": "Take a patient and a drug as inputs", "check": { "var": ["p?", "drug?"] } },
+      { "text": "Add the drug to the patient's prescriptions", "check": { "holds": "prescribed′ = prescribed ∪ {p? ↦ drug?}" } },
+      { "text": "Leave allergies and patients unchanged", "check": { "holds": "allergic′ = allergic ∧ patients′ = patients" } }
+    ]
+  }
+}
+```
+
+Checks are written with the names of the template's reference spec (its full, hidden
+lines). Semantics:
+
+* `given`: the student declared a given set with that name (case-insensitive, a
+  trailing S ignored).
+* `var`: the reference variable(s) can be matched to student variables of the same
+  type (state variables, inputs `?`, outputs `!`). Reference variables are matched to
+  student variables by type only (given sets matched by name as above), with one
+  injective mapping per spec chosen to achieve the most goals; ties keep declaration
+  order. Names never matter.
+* `holds`: under that mapping, the predicate holds in every example the student's spec
+  allows: sampled valid states (state goals), initial states (init), or operation runs
+  (operation goals; values the spec leaves open are tested with their alternatives too).
+  At least one example must exist. This is a bounded check (small example universes),
+  which is fine for a progress indicator.

@@ -7,7 +7,7 @@
  * (see --z-* tokens in src/app.css).
  */
 export type SymbolCategory =
-  | 'type' // ℙ ℕ ℤ ℝ ×, given-set names
+  | 'type' // ℙ ℕ ℤ ×, given-set names
   | 'relation' // ↔ ⇸ → ↦ dom ran
   | 'set' // ∈ ∉ ⊆ ⊂ ∪ ∩ ∖ ∅ # { | }
   | 'logic' // ∧ ∨ ¬ ⇒ ⇔ ∀ ∃ • = ≠ < ≤ > ≥ + − ∗
@@ -50,7 +50,6 @@ export const SYMBOLS: ZSymbol[] = [
   { id: 'nat', text: 'ℕ', name: 'natural numbers', category: 'type', ascii: ['NN'], snippet: 'ℕ', library: 'more' },
   { id: 'nat1', text: 'ℕ₁', name: 'positive natural numbers', category: 'type', ascii: ['NN1'], snippet: 'ℕ₁', library: 'more' },
   { id: 'int', text: 'ℤ', name: 'integers', category: 'type', ascii: ['ZZ'], snippet: 'ℤ', library: 'more' },
-  { id: 'real', text: 'ℝ', name: 'real numbers', category: 'type', ascii: ['RR'], snippet: 'ℝ', library: 'more' },
   { id: 'cross', text: '×', name: 'Cartesian product', category: 'type', ascii: ['><'], snippet: '${X} × ${Y}', library: 'more' },
 
   // ── relations & functions ────────────────────────────────────────────────

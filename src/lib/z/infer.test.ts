@@ -158,7 +158,7 @@ describe('effects of other operations', () => {
     extra: [
       op('op-rm', 'Return', 'ΔLibrary\nbook? : BOOK', 'book? ∈ onLoan\nborrower′ = borrower ∖ {book? ↦ borrower(book?)}'),
       op('op-clear', 'Clear', 'ΔLibrary', 'borrower′ = ∅'),
-      op('op-two', 'AddTwo', 'ΔLibrary\na?, b? : BOOK\nm? : MEMBER', 'a? ∉ onLoan\nb? ∉ onLoan\nborrower′ = borrower ∪ {a? ↦ m?} ∪ {b? ↦ m?}'),
+      op('op-two', 'AddTwo', 'ΔLibrary\na? : BOOK\nb? : BOOK\nm? : MEMBER', 'a? ∉ onLoan\nb? ∉ onLoan\nborrower′ = borrower ∪ {a? ↦ m?} ∪ {b? ↦ m?}'),
       op('op-same', 'Touch', 'ΔLibrary', 'borrower′ = borrower'),
     ],
   });

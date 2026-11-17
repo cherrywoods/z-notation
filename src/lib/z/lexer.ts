@@ -28,6 +28,7 @@ export interface Token {
 }
 
 /** Characters that look like letters but are Z symbols. */
+// (ℝ is not part of the tutorial, but must not become part of a name either.)
 const NOT_IDENT = new Set(['ℙ', 'ℕ', 'ℤ', 'ℝ', 'Δ', 'Ξ']);
 const IDENT_START = /[\p{L}_]/u;
 const IDENT_CONT = /[\p{L}\p{N}_]/u;
@@ -63,7 +64,6 @@ const ALIASES: Record<string, string> = {
   '⦁': '•', // Z NOTATION SPOT
   '−': '-', // MINUS SIGN
   '∗': '*',
-  '⤀': '⇸', // in case a font substitutes
   '∖': '∖',
 };
 

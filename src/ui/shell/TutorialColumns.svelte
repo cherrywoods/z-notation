@@ -51,6 +51,12 @@
   .single {
     max-width: 1100px;
   }
+  /* phones: the arrows sit in a bottom bar (≈ 69px + safe area) */
+  @media (max-width: 640px) {
+    .cols {
+      padding-bottom: calc(96px + env(safe-area-inset-bottom));
+    }
+  }
   @media print {
     .cols {
       padding: 0;

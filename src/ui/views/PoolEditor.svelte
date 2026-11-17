@@ -1,8 +1,9 @@
 <script lang="ts">
   // Editable example values of one given set, as a Z set display:
   //   PATIENT = {Ana, Ben, Chen, …}
-  // Commas or spaces separate values; a trailing … (or ...) marks the set as infinite
-  // in principle (examples still use the listed values).
+  // Commas separate values (so "Dana Smith" is one value); braces typed inside are
+  // dropped. A … (or ...) anywhere marks the set as infinite in principle; it is shown
+  // at the end (examples still use the listed values).
   import { explain } from '../explain/explain.svelte';
 
   interface Props {
@@ -26,6 +27,7 @@
   });
 
   const show = (vals: string[], inf: boolean) => [...vals, ...(inf ? ['…'] : [])].join(', ');
+  const unique = (v: string, i: number, all: string[]) => all.indexOf(v) === i;
 
   // show the current values unless the user is typing
   $effect(() => {
@@ -34,13 +36,13 @@
 
   function parse(t: string): { vals: string[]; inf: boolean } {
     const norm = t.replace(/\.\.\./g, '…');
-    const inf = /…\s*$/.test(norm);
+    const inf = norm.includes('…');
     const vals = norm
-      .replace(/…/g, ' ')
-      .split(/[,\s]+/)
-      .map((v) => v.trim())
-      .filter((v) => v && v !== '…')
-      .filter((v, i, all) => all.indexOf(v) === i);
+      .replace(/[{}…]/g, '')
+      .split(',')
+      .map((v) => v.trim().replace(/\s+/g, ' '))
+      .filter(Boolean)
+      .filter(unique);
     return { vals, inf };
   }
 
@@ -64,7 +66,7 @@
       rows="1"
       spellcheck="false"
       autocomplete="off"
-      aria-label={`Example values of ${name}; end with … if there are infinitely many`}
+      aria-label={`Example values of ${name}, separated by commas; add … if there are infinitely many`}
       bind:value={text}
       bind:this={area}
       onfocus={() => (focused = true)}
@@ -75,7 +77,7 @@
         text = show(vals, inf);
       }}
       oninput={() => {
-        if (text.endsWith('...')) text = text.slice(0, -3) + '…';
+        if (text.includes('...')) text = text.replace(/\.\.\./g, '…');
         commit();
       }}
       onkeydown={(e) => {
@@ -97,8 +99,12 @@
   .eq,
   .set {
     font-family: var(--font-z);
-    font-size: 1.05rem;
+    font-size: calc(1.05rem * var(--z-scale, 1));
     line-height: 1.75;
+  }
+  .name {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .eq,
   .set {
@@ -121,7 +127,11 @@
     min-width: 4ch;
     width: 100%;
     resize: none;
-    overflow: hidden;
+    /* at most about six lines, then it scrolls */
+    max-height: calc(1.75em * 6);
+    overflow-x: hidden;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
     display: block;
     transition:
       border-color 0.15s,

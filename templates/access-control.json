@@ -4,6 +4,13 @@
   "short": "Role-Based Access Control",
   "icon": "key-round",
   "description": "Users hold roles, roles grant permissions, and some roles conflict.",
+  "card": [
+    "Users get their permissions through roles, such as clerk or approver.",
+    "Some roles conflict: whoever creates payments must not also approve them.",
+    "Nobody may hold two conflicting roles.",
+    "Administrators assign roles, and users can see what they are allowed to do."
+  ],
+  "typesPrompt": "The system deals with users, roles and permissions.",
   "requirements": [
     { "id": "R1", "text": "Only registered users can hold roles." },
     { "id": "R2", "text": "A user can hold several roles, and a role can grant several permissions." },
@@ -24,13 +31,66 @@
       "values": ["createPayment", "approvePayment", "readLedger", "editUsers", "deployCode", "readLogs"]
     }
   ],
+  "typeOptions": [
+    { "name": "RESOURCE", "values": ["ledger", "payroll", "logs", "repo", "wiki", "crm"], "infinite": true },
+    { "name": "GROUP", "values": ["finance", "devops", "audit", "hr", "sales", "it"], "infinite": true }
+  ],
   "fixedValues": {
     "conflicts": "{clerk ↦ approver, approver ↦ clerk, developer ↦ operator, operator ↦ developer}",
     "grants": "{clerk ↦ createPayment, approver ↦ approvePayment, auditor ↦ readLedger, auditor ↦ readLogs, admin ↦ editUsers, developer ↦ readLogs, operator ↦ deployCode}"
   },
+  "goals": {
+    "types": [
+      { "text": "A type for users", "check": { "given": "USER" } },
+      { "text": "A type for roles", "check": { "given": "ROLE" } },
+      { "text": "A type for permissions", "check": { "given": "PERMISSION" } }
+    ],
+    "state": [
+      { "text": "Which users are registered and which roles they hold", "check": { "var": ["users", "holds"] } },
+      { "text": "Which permissions each role grants", "check": { "var": "grants" } },
+      { "text": "Which roles conflict with each other", "check": { "var": "conflicts" } },
+      { "text": "Only registered users hold roles", "check": { "holds": "dom holds ⊆ users" } },
+      {
+        "text": "Nobody holds two conflicting roles",
+        "check": { "holds": "∀ u : USER; r₁, r₂ : ROLE • (u ↦ r₁) ∈ holds ∧ (u ↦ r₂) ∈ holds ⇒ (r₁ ↦ r₂) ∉ conflicts" }
+      }
+    ],
+    "init": [
+      { "text": "No users at the start", "check": { "holds": "users = ∅" } },
+      { "text": "Nobody holds a role at the start", "check": { "holds": "holds = ∅" } }
+    ],
+    "ops": {
+      "ListPermissions": [
+        { "text": "Take a user as input and output permissions", "check": { "var": ["user?", "perms!"] } },
+        { "text": "Only for registered users", "check": { "holds": "user? ∈ users" } },
+        {
+          "text": "Output every permission one of the user's roles grants",
+          "check": { "holds": "perms! = { p ∈ PERMISSION | ∃ r : ROLE • (user? ↦ r) ∈ holds ∧ (r ↦ p) ∈ grants }" }
+        },
+        {
+          "text": "Don't change anything",
+          "check": { "holds": "users′ = users ∧ holds′ = holds ∧ grants′ = grants ∧ conflicts′ = conflicts" }
+        }
+      ],
+      "AssignRole": [
+        { "text": "Take a user and a role as inputs", "check": { "var": ["user?", "role?"] } },
+        { "text": "Only for registered users", "check": { "holds": "user? ∈ users" } },
+        {
+          "text": "Never a role that conflicts with one the user holds",
+          "check": { "holds": "∀ r : ROLE • (user? ↦ r) ∈ holds ⇒ (r ↦ role?) ∉ conflicts" }
+        },
+        { "text": "Give the user the role", "check": { "holds": "holds′ = holds ∪ {user? ↦ role?}" } },
+        {
+          "text": "Leave users, permissions and conflicts unchanged",
+          "check": { "holds": "users′ = users ∧ grants′ = grants ∧ conflicts′ = conflicts" }
+        }
+      ]
+    }
+  },
   "state": {
+    "invariantPrompt": "Nobody may hold two conflicting roles.",
     "name": "AccessControl",
-    "prompt": "Nobody may hold two conflicting roles.",
+    "prompt": "Users, their roles, and what each role allows. Nobody may hold two conflicting roles.",
     "declarations": [
       { "text": "users : ℙ USER", "requirements": ["R1"] },
       { "text": "holds : USER ↔ ROLE", "requirements": ["R2"] },
@@ -62,7 +122,7 @@
     {
       "name": "ListPermissions",
       "kind": "query",
-      "prompt": "Output every permission that one of the user's roles grants.",
+      "prompt": "Show all permissions a given user has through their roles.",
       "declarations": [
         { "text": "ΞAccessControl", "requirements": [] },
         { "text": "user? : USER", "requirements": ["R6"] },
@@ -80,7 +140,7 @@
     {
       "name": "AssignRole",
       "kind": "update",
-      "prompt": "Give the user the role, unless it conflicts with a role they hold.",
+      "prompt": "Give a user a role, unless it conflicts with one they already hold.",
       "declarations": [
         { "text": "ΔAccessControl", "requirements": [] },
         { "text": "user? : USER", "requirements": ["R7"] },

@@ -16,6 +16,12 @@
   let spin = $state(0);
 
   const isOp = $derived(schemaId.startsWith('op-'));
+  /** Lines with syntax/type errors are left out of the example. */
+  const hasErrors = $derived(
+    (schemaId === 'types' ? live.diagnosticsFor('types', 'given') : [...live.diagnosticsFor(schemaId, 'decls'), ...live.diagnosticsFor(schemaId, 'preds')]).some(
+      (d) => d.severity === 'error',
+    ),
+  );
   const given = $derived(live.spec ? givenNames(live.spec.given) : []);
   const ctx = $derived(live.spec ? explainCtxOf(live.spec) : undefined);
 
@@ -35,10 +41,23 @@
     }
   });
 
+  /** Nothing declared yet: no example, no tools. */
+  const empty = $derived.by(() => {
+    const r = result;
+    if (!r || r.kind === 'types') return false;
+    if (r.kind === 'state') return r.ok && r.vars.length === 0;
+    return r.ok && r.before.length + r.inputs.length + r.after.length + r.outputs.length === 0;
+  });
+
   function regenerate() {
     seed = newSeed();
     spin++;
   }
+
+  /** `bounded`: only checked for small values (quantifiers over ℕ, ℤ, …). Optional field. */
+  type Check = PredCheck & { bounded?: boolean };
+  const markOf = (c: Check) => (c.bounded ? '≈' : c.result === true ? '✓' : '✗');
+  const markLabel = (c: Check) => (c.bounded ? 'Only checked for small values' : c.result === true ? 'holds' : 'fails');
 
   /** Predicates worth listing under an example (the step's own lines). */
   const ownChecks = (checks: PredCheck[]) => checks.filter((c) => c.origin === 'own');
@@ -47,8 +66,8 @@
 
 <section class="panel" aria-label="Example">
   <header>
-    <h2>Example</h2>
-    <div class="tools">
+    <h2>Example state</h2>
+    <div class="tools" class:hidden={empty}>
       {#if isOp}
         <button
           type="button"
@@ -73,8 +92,10 @@
     </div>
   </header>
 
-  {#if !result}
-    <p class="muted">…</p>
+  {#if hasErrors}<p class="muted errors">Lines with errors are not checked.</p>{/if}
+
+  {#if !result || empty}
+    <!-- nothing to show until something is declared -->
   {:else if result.kind === 'types'}
     <div class="vars">
       {#each result.carriers as c (c.name)}
@@ -135,8 +156,10 @@
   {#if list.length}
     <ul class="checks">
       {#each list as c, i (i)}
-        <li class:bad={c.result !== true}>
-          <span class="mark" aria-label={c.result === true ? 'holds' : 'fails'}>{c.result === true ? '✓' : '✗'}</span>
+        <li class:bad={c.result !== true && !(c as Check).bounded} class:approx={(c as Check).bounded}>
+          <span class="mark" role="img" aria-label={markLabel(c)} title={(c as Check).bounded ? markLabel(c) : undefined}
+            >{markOf(c)}</span
+          >
           <span class="pred"><ZText text={c.text} givenSets={given} {ctx} /></span>
           {#if c.message}<span class="msg">{c.message}</span>{/if}
         </li>
@@ -147,9 +170,10 @@
 
 <style>
   .panel {
-    background: var(--ui-bg);
-    border: 1px solid var(--ui-border);
+    background: var(--bg-sunken);
+    border: 1px solid var(--edge-sunken);
     border-radius: var(--radius);
+    box-shadow: var(--shadow-sunken);
     padding: 12px 18px 16px;
   }
   header {
@@ -175,6 +199,9 @@
   .tools {
     display: flex;
     gap: 4px;
+  }
+  .tools.hidden {
+    visibility: hidden;
   }
   .tool {
     width: 32px;
@@ -213,7 +240,8 @@
   }
   .vars {
     display: grid;
-    grid-template-columns: max-content max-content minmax(0, 1fr);
+    /* a very long name may take at most 40% and wraps */
+    grid-template-columns: fit-content(40%) max-content minmax(0, 1fr);
     column-gap: 8px;
     row-gap: 2px;
     align-items: baseline;
@@ -222,14 +250,19 @@
   .name,
   .eq {
     font-family: var(--font-z);
-    font-size: 1.05rem;
+    font-size: calc(1.05rem * var(--z-scale, 1));
     color: var(--fg);
   }
   .name :global(.z-text) {
-    font-size: 1.05rem;
+    font-size: calc(1.05rem * var(--z-scale, 1));
+  }
+  .name,
+  .val {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .val {
-    font-size: 1.05rem;
+    font-size: calc(1.05rem * var(--z-scale, 1));
     color: var(--fg);
   }
   /* after-state values equal to the before-state recede, changes stand out */
@@ -304,8 +337,12 @@
   .bad .mark {
     color: var(--bad);
   }
+  .approx .mark {
+    color: var(--ui-fg);
+    cursor: help;
+  }
   .pred :global(.z-text) {
-    font-size: 1rem;
+    font-size: calc(1rem * var(--z-scale, 1));
   }
   .msg {
     grid-column: 2;
@@ -316,5 +353,12 @@
     margin: 6px 0 0;
     color: var(--ui-fg);
     font-size: 0.9rem;
+  }
+  .muted.errors {
+    margin: 0 0 4px;
+    font-size: 0.85rem;
+  }
+  .panel {
+    min-width: 0;
   }
 </style>

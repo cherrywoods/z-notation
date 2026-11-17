@@ -11,6 +11,7 @@
   import StepRow from './StepRow.svelte';
   import ResetControl from './ResetControl.svelte';
   import ArrowButton from './ArrowButton.svelte';
+  import StepAbout from '../steps/StepAbout.svelte';
   import StepTypes from '../steps/StepTypes.svelte';
   import StepState from '../steps/StepState.svelte';
   import StepOperation from '../steps/StepOperation.svelte';
@@ -127,7 +128,9 @@
   <main class="stage">
     {#key viewKey}
       <div class="view" in:stepIn out:stepOut>
-        {#if step === 'types'}
+        {#if step === 'about'}
+          <StepAbout {spec} />
+        {:else if step === 'types'}
           <StepTypes {spec} />
         {:else if step === 'state'}
           <StepState {spec} />
@@ -142,17 +145,22 @@
     {/key}
   </main>
 
-  <ArrowButton
-    dir="back"
-    label={prev ? `Back: ${prev.label}` : 'All topics'}
-    href={prev ? stepHref(topicId, prev.id) : '#/'}
-  />
-  <ArrowButton
-    dir="next"
-    label={next ? `Next: ${next.label}` : 'Next'}
-    href={next ? stepHref(topicId, next.id) : undefined}
-    visible={!!next}
-  />
+  <!-- desktop: two floating corner buttons; phones: a white bar at the bottom -->
+  <nav class="arrows" aria-label="Back and next">
+    <ArrowButton
+      dir="back"
+      docked
+      label={prev ? `Back: ${prev.label}` : 'All topics'}
+      href={prev ? stepHref(topicId, prev.id) : '#/'}
+    />
+    <ArrowButton
+      dir="next"
+      docked
+      label={next ? `Next: ${next.label}` : 'Next'}
+      href={next ? stepHref(topicId, next.id) : undefined}
+      visible={!!next}
+    />
+  </nav>
 </div>
 
 <style>
@@ -260,6 +268,30 @@
   }
   @media print {
     header {
+      display: none;
+    }
+  }
+  .arrows {
+    display: contents;
+  }
+  @media (max-width: 640px) {
+    .arrows {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px max(16px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom))
+        max(16px, env(safe-area-inset-left));
+      background: var(--bg);
+      border-top: 1px solid var(--ui-border);
+    }
+  }
+  @media print {
+    .arrows {
       display: none;
     }
   }

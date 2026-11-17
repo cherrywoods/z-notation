@@ -3,15 +3,10 @@
 // element types (∅, `{}`); `error` silently unifies with everything so that one
 // mistake does not cause a cascade of follow-up messages.
 
-//
-// There is a single numeric type for ℕ, ℕ₁, ℤ and ℝ (no subtyping, no coercions).
-// Its optional `real` flag only records that the type came from ℝ or a decimal
-// literal, so that messages can say `SENSOR ↔ ℝ` instead of `SENSOR ↔ ℤ`; type
-// equality and unification ignore it.
 
 export type ZType =
   | { k: 'given'; name: string }
-  | { k: 'int'; real?: boolean }
+  | { k: 'int' }
   | { k: 'bool' }
   | { k: 'power'; elem: ZType }
   | { k: 'product'; elems: ZType[] }
@@ -19,8 +14,6 @@ export type ZType =
   | { k: 'error' };
 
 export const INT: ZType = { k: 'int' };
-/** The numeric type, as written with ℝ (same type as INT; prints as ℝ). */
-export const REAL: ZType = { k: 'int', real: true };
 export const BOOL: ZType = { k: 'bool' };
 export const ERROR: ZType = { k: 'error' };
 export const given = (name: string): ZType => ({ k: 'given', name });
@@ -84,7 +77,7 @@ function tstr(t: ZType, min: number, rel: boolean): string {
     case 'given':
       return t.name;
     case 'int':
-      return t.real ? 'ℝ' : 'ℤ';
+      return 'ℤ';
     case 'bool':
       return 'predicate';
     case 'var':

@@ -18,6 +18,8 @@ export interface SchemaDoc {
   preds: string;
   /** Short task prompt shown above the schema box (very little text!). */
   prompt?: string;
+  /** Placeholder of the (empty) predicate part, e.g. the key safety property. */
+  predPrompt?: string;
   /** For operations: suggested kind (shown as a small Ξ/Δ badge). */
   opKind?: OpKind;
 }
@@ -27,6 +29,8 @@ export interface SpecDoc {
   topicId: string;
   /** Human title of the system, e.g. 'Medication Prescribing'. */
   title: string;
+  /** Own topic only: the student's short description of the system (System step). */
+  description?: string;
   /** Text of the given-set paragraph, e.g. '[BOOK, MEMBER]'. */
   given: string;
   /** Short prompt for the Types step. */

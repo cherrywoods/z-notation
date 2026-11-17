@@ -37,8 +37,8 @@ export type RelOp = '=' | '≠' | '∈' | '∉' | '⊆' | '⊂' | '<' | '≤' | 
 export type Term =
   // ── expressions ────────────────────────────────────────────────────────────
   | { kind: 'name'; name: string; base: string; decoration: Decoration; span: Span }
-  | { kind: 'num'; value: number; span: Span } // 3, -3, 0.25 (a minus before a literal is folded in)
-  | { kind: 'builtinSet'; set: 'ℕ' | 'ℕ₁' | 'ℤ' | 'ℝ'; span: Span }
+  | { kind: 'num'; value: number; span: Span } // 3, -3 (a minus before a literal is folded in)
+  | { kind: 'builtinSet'; set: 'ℕ' | 'ℕ₁' | 'ℤ'; span: Span }
   | { kind: 'emptyset'; span: Span }
   | { kind: 'setDisplay'; elems: Term[]; span: Span } // {a, b, c}
   | { kind: 'setComp'; decls: VarDecl[]; pred?: Term; expr?: Term; span: Span } // { x : S | P • e }

@@ -1,15 +1,17 @@
 <!--
-  Presentation mode: full-screen white overlay with a big QR code of the page URL
-  (origin + path, no hash) so students can join. Esc / click / close button returns.
+  The big QR view: full-screen white overlay with a large QR code and the address
+  students should open (see url.ts). Opened from the presenter footer's QR code;
+  Esc / click / the close button return.
 -->
 <script lang="ts">
   import { X } from '@lucide/svelte';
   import { fade, scale } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
-  import { router } from '../../lib/router.svelte';
+  import { presenter } from './presenter.svelte';
   import { qrSvg } from './qr';
+  import { joinUrl } from './url';
 
-  const url = location.origin + location.pathname;
+  const url = joinUrl();
   const shown = url.replace(/^https?:\/\//, '').replace(/\/index\.html$/, '/').replace(/\/$/, '');
   // no quiet zone in the SVG: the white page around it is the quiet zone
   const qr = qrSvg(url, 0);
@@ -17,7 +19,7 @@
   let overlay: HTMLDivElement | undefined = $state();
 
   function close() {
-    router.back('#/');
+    presenter.big = false;
   }
 
   $effect(() => {

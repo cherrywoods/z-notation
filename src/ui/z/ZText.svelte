@@ -100,7 +100,8 @@
 <style>
   .ztext {
     white-space: pre-wrap;
-    overflow-wrap: break-word;
+    /* very long names break instead of widening the page */
+    overflow-wrap: anywhere;
     word-spacing: 0.06em;
   }
   .ztext.block {

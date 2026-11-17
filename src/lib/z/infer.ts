@@ -622,8 +622,8 @@ function declarationPremise(ctx: Ctx, t: Term): Premise | null {
     const d = ctx.decls.get(v.x.name);
     if (d) {
       const ks = key(v.s);
-      // x : ℕ₁ gives x ∈ ℕ₁, ℕ, ℤ, ℝ (ℕ₁ ⊆ ℕ ⊆ ℤ ⊆ ℝ)
-      const rank = (s: string) => ['ℕ₁', 'ℕ', 'ℤ', 'ℝ'].indexOf(s);
+      // x : ℕ₁ gives x ∈ ℕ₁, ℕ, ℤ (ℕ₁ ⊆ ℕ ⊆ ℤ)
+      const rank = (s: string) => ['ℕ₁', 'ℕ', 'ℤ'].indexOf(s);
       const wider = d.kind === 'builtinSet' && rank(d.set) >= 0 && rank(ks) >= rank(d.set);
       if (key(d) === ks || wider) return decl(v.x.name);
     }

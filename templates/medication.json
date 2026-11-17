@@ -4,6 +4,13 @@
   "short": "Medication Prescribing",
   "icon": "pill",
   "description": "Doctors prescribe drugs to ward patients, respecting known allergies.",
+  "card": [
+    "Doctors on a hospital ward prescribe drugs to their patients.",
+    "The ward records which drugs each patient is allergic to.",
+    "A patient must never be prescribed a drug they are allergic to.",
+    "Doctors can look up what a patient is currently prescribed."
+  ],
+  "typesPrompt": "The ward deals with patients and drugs.",
   "requirements": [
     { "id": "R1", "text": "Allergies and prescriptions are only recorded for patients admitted to the ward." },
     { "id": "R2", "text": "A patient can be allergic to several drugs and can be prescribed several drugs." },
@@ -16,12 +23,70 @@
     { "name": "PATIENT", "values": ["Ana", "Ben", "Chen", "Dana", "Emil", "Finn", "Gina", "Hugo"], "infinite": true },
     {
       "name": "DRUG",
-      "values": ["aspirin", "warfarin", "ibuprofen", "penicillin", "heparin", "insulin", "morphine", "codeine"], "infinite": true
+      "values": ["aspirin", "warfarin", "ibuprofen", "penicillin", "heparin", "insulin", "morphine", "codeine"],
+      "infinite": true
     }
   ],
+  "typeOptions": [
+    { "name": "DOCTOR", "values": ["drHall", "drKim", "drLopez", "drNovak", "drOkafor", "drPatel"], "infinite": true },
+    { "name": "NURSE", "values": ["Ines", "Jonas", "Kofi", "Lara", "Milan", "Nora"], "infinite": true },
+    {
+      "name": "DATE",
+      "values": ["2.Feb", "17.Apr", "8.Jun", "23.Jul", "5.Sep", "11.Nov", "29.Jan", "14.Mar"],
+      "infinite": true
+    }
+  ],
+  "goals": {
+    "types": [
+      { "text": "A type for patients", "check": { "given": "PATIENT" } },
+      { "text": "A type for drugs", "check": { "given": "DRUG" } }
+    ],
+    "state": [
+      { "text": "Which patients are on the ward", "check": { "var": "patients" } },
+      { "text": "Which drugs each patient is allergic to", "check": { "var": "allergic" } },
+      { "text": "Which drugs each patient is prescribed", "check": { "var": "prescribed" } },
+      {
+        "text": "Only patients on the ward have allergies or prescriptions",
+        "check": { "holds": "dom allergic ⊆ patients ∧ dom prescribed ⊆ patients" }
+      },
+      { "text": "Nobody gets a drug they are allergic to", "check": { "holds": "prescribed ∩ allergic = ∅" } }
+    ],
+    "init": [
+      { "text": "The ward starts empty", "check": { "holds": "patients = ∅" } },
+      { "text": "No allergies or prescriptions at the start", "check": { "holds": "allergic = ∅ ∧ prescribed = ∅" } }
+    ],
+    "ops": {
+      "ViewPrescriptions": [
+        { "text": "Take a patient as input and output drugs", "check": { "var": ["p?", "drugs!"] } },
+        { "text": "Only for patients on the ward", "check": { "holds": "p? ∈ patients" } },
+        {
+          "text": "Output exactly the patient's prescribed drugs",
+          "check": { "holds": "drugs! = { d ∈ DRUG | (p? ↦ d) ∈ prescribed }" }
+        },
+        {
+          "text": "Don't change anything",
+          "check": { "holds": "patients′ = patients ∧ allergic′ = allergic ∧ prescribed′ = prescribed" }
+        }
+      ],
+      "Prescribe": [
+        { "text": "Take a patient and a drug as inputs", "check": { "var": ["p?", "drug?"] } },
+        { "text": "Only for patients on the ward", "check": { "holds": "p? ∈ patients" } },
+        { "text": "Never a drug the patient is allergic to", "check": { "holds": "(p? ↦ drug?) ∉ allergic" } },
+        {
+          "text": "Add the drug to the patient's prescriptions",
+          "check": { "holds": "prescribed′ = prescribed ∪ {p? ↦ drug?}" }
+        },
+        {
+          "text": "Leave patients and allergies unchanged",
+          "check": { "holds": "patients′ = patients ∧ allergic′ = allergic" }
+        }
+      ]
+    }
+  },
   "state": {
+    "invariantPrompt": "Nobody may be prescribed a drug they are allergic to.",
     "name": "Ward",
-    "prompt": "Nobody may be prescribed a drug they are allergic to.",
+    "prompt": "Patients, their allergies and their prescriptions. Nobody may get a drug they're allergic to.",
     "declarations": [
       { "text": "patients : ℙ PATIENT", "requirements": ["R1"] },
       { "text": "allergic : PATIENT ↔ DRUG", "requirements": ["R2"] },
@@ -35,7 +100,7 @@
   },
   "init": {
     "name": "InitWard",
-    "prompt": "At the start, no patients are on the ward.",
+    "prompt": "At the start, the ward is empty.",
     "declarations": [
       { "text": "Ward", "requirements": [] }
     ],
@@ -47,7 +112,7 @@
     {
       "name": "ViewPrescriptions",
       "kind": "query",
-      "prompt": "Output all drugs currently prescribed to the patient.",
+      "prompt": "Show which drugs a patient is prescribed.",
       "declarations": [
         { "text": "ΞWard", "requirements": [] },
         { "text": "p? : PATIENT", "requirements": ["R5"] },
@@ -61,7 +126,7 @@
     {
       "name": "Prescribe",
       "kind": "update",
-      "prompt": "Prescribe the drug, but never one the patient is allergic to.",
+      "prompt": "Prescribe a drug to a patient, but never one they're allergic to.",
       "declarations": [
         { "text": "ΔWard", "requirements": [] },
         { "text": "p? : PATIENT", "requirements": ["R6"] },

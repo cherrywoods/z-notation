@@ -74,7 +74,7 @@ export function computeReplacement(before: string, typed: string): Replacement |
     return { from: before.length - p[0].length, to: s.length, insert: p[1] + typed };
   }
 
-  // 4. Word shortcuts (in, notin, union, inter, forall, exists, not, PP, NN, NN1, ZZ, RR),
+  // 4. Word shortcuts (in, notin, union, inter, forall, exists, not, PP, NN, NN1, ZZ),
   //    replaced when the word is finished by a non-identifier character.
   if (!isIdentChar(typed)) {
     const w = wordBefore(before, before.length);
@@ -102,7 +102,7 @@ export function normalizeAscii(text: string): string {
       rep = t.value;
     } else if (t.kind === 'ident' && t.decoration === '′' && src.endsWith("'")) {
       rep = src.slice(0, -1) + '′';
-    } else if (t.kind === 'ident' && /^(PP|NN|NN1|ZZ|RR)$/.test(src)) {
+    } else if (t.kind === 'ident' && /^(PP|NN|NN1|ZZ)$/.test(src)) {
       rep = WORDS.get(src) ?? null;
     }
     if (rep !== null) {

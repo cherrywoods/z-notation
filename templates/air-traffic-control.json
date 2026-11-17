@@ -4,6 +4,13 @@
   "short": "Air Traffic Control",
   "icon": "plane",
   "description": "A tower clears approaching aircraft to land on its runways.",
+  "card": [
+    "The tower clears approaching aircraft to land, each on one runway.",
+    "No aircraft may be cleared for a runway that is still occupied.",
+    "Two aircraft may never be cleared for the same runway.",
+    "Controllers can check which runway an aircraft is cleared for."
+  ],
+  "typesPrompt": "The tower deals with aircraft and runways.",
   "requirements": [
     { "id": "R1", "text": "Only aircraft approaching under the tower's control can hold a landing clearance." },
     { "id": "R2", "text": "An aircraft holds at most one landing clearance, for a single runway." },
@@ -14,12 +21,70 @@
     { "id": "R7", "text": "The tower can clear an approaching aircraft to land on a runway." }
   ],
   "givenSets": [
-    { "name": "AIRCRAFT", "values": ["DLH4AB", "BAW12", "AFR77", "SWR3", "EZY81", "RYR9", "UAL926", "KLM15"], "infinite": true },
+    {
+      "name": "AIRCRAFT",
+      "values": ["DLH4AB", "BAW12", "AFR77", "SWR3", "EZY81", "RYR9", "UAL926", "KLM15"],
+      "infinite": true
+    },
     { "name": "RUNWAY", "values": ["rwy07L", "rwy07R", "rwy25L", "rwy25R", "rwy18", "rwy36"] }
   ],
+  "typeOptions": [
+    { "name": "GATE", "values": ["A1", "A2", "B4", "B7", "C3", "C9"] },
+    { "name": "AIRLINE", "values": ["DLH", "BAW", "AFR", "SWR", "EZY", "RYR"], "infinite": true },
+    {
+      "name": "CONTROLLER",
+      "values": ["ctlAnna", "ctlBen", "ctlCleo", "ctlDev", "ctlEva", "ctlFinn"],
+      "infinite": true
+    }
+  ],
+  "goals": {
+    "types": [
+      { "text": "A type for aircraft", "check": { "given": "AIRCRAFT" } },
+      { "text": "A type for runways", "check": { "given": "RUNWAY" } }
+    ],
+    "state": [
+      { "text": "Which aircraft are approaching", "check": { "var": "approaching" } },
+      { "text": "Which runways are occupied", "check": { "var": "occupied" } },
+      { "text": "Which runway each aircraft is cleared to land on", "check": { "var": "cleared" } },
+      {
+        "text": "Only approaching aircraft are cleared, at most one per runway",
+        "check": { "holds": "dom cleared ⊆ approaching ∧ (∀ a₁, a₂ : dom cleared • cleared(a₁) = cleared(a₂) ⇒ a₁ = a₂)" }
+      },
+      { "text": "No clearance for an occupied runway", "check": { "holds": "ran cleared ∩ occupied = ∅" } }
+    ],
+    "init": [
+      { "text": "No aircraft approaching at the start", "check": { "holds": "approaching = ∅" } },
+      { "text": "No clearances at the start", "check": { "holds": "cleared = ∅" } }
+    ],
+    "ops": {
+      "FindClearance": [
+        { "text": "Take an aircraft as input and output a runway", "check": { "var": ["a?", "r!"] } },
+        { "text": "Only for aircraft with a clearance", "check": { "holds": "a? ∈ dom cleared" } },
+        { "text": "Output the runway it is cleared for", "check": { "holds": "(a? ↦ r!) ∈ cleared" } },
+        {
+          "text": "Don't change anything",
+          "check": { "holds": "approaching′ = approaching ∧ occupied′ = occupied ∧ cleared′ = cleared" }
+        }
+      ],
+      "ClearToLand": [
+        { "text": "Take an aircraft and a runway as inputs", "check": { "var": ["a?", "r?"] } },
+        { "text": "Only for approaching aircraft", "check": { "holds": "a? ∈ approaching" } },
+        {
+          "text": "Only onto a free runway no other aircraft is cleared for",
+          "check": { "holds": "r? ∉ occupied ∧ r? ∉ ran (cleared ∖ {a? ↦ r?})" }
+        },
+        { "text": "Record the landing clearance", "check": { "holds": "cleared′ = cleared ∪ {a? ↦ r?}" } },
+        {
+          "text": "Leave approaching aircraft and runways unchanged",
+          "check": { "holds": "approaching′ = approaching ∧ occupied′ = occupied" }
+        }
+      ]
+    }
+  },
   "state": {
+    "invariantPrompt": "No aircraft may be cleared to land on an occupied runway.",
     "name": "Tower",
-    "prompt": "No aircraft may be cleared to land on an occupied runway.",
+    "prompt": "Approaching aircraft, occupied runways and landing clearances. No clearance for an occupied runway.",
     "declarations": [
       { "text": "approaching : ℙ AIRCRAFT", "requirements": ["R1"] },
       { "text": "occupied : ℙ RUNWAY", "requirements": ["R4"] },
@@ -33,7 +98,7 @@
   },
   "init": {
     "name": "InitTower",
-    "prompt": "At the start, the tower controls no aircraft.",
+    "prompt": "At the start, no aircraft are approaching.",
     "declarations": [
       { "text": "Tower", "requirements": [] }
     ],
@@ -45,7 +110,7 @@
     {
       "name": "FindClearance",
       "kind": "query",
-      "prompt": "Output the runway the aircraft is cleared to land on.",
+      "prompt": "Show which runway a given aircraft is cleared to land on.",
       "declarations": [
         { "text": "ΞTower", "requirements": [] },
         { "text": "a? : AIRCRAFT", "requirements": ["R6"] },
@@ -59,7 +124,7 @@
     {
       "name": "ClearToLand",
       "kind": "update",
-      "prompt": "The runway must be free, and nobody else may be cleared for it.",
+      "prompt": "Clear an approaching aircraft to land on a free runway nobody else is cleared for.",
       "declarations": [
         { "text": "ΔTower", "requirements": [] },
         { "text": "a? : AIRCRAFT", "requirements": ["R7"] },

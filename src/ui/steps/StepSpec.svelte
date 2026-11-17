@@ -3,17 +3,52 @@
   Contract: props { spec }; one <TutorialColumns> with only `main`.
 -->
 <script lang="ts">
-  import type { SpecDoc } from '../../lib/spec/model';
+  import type { SchemaDoc, SectionPart, SpecDoc } from '../../lib/spec/model';
   import TutorialColumns from '../shell/TutorialColumns.svelte';
   import StaticSchema from '../views/StaticSchema.svelte';
   import ZText from '../z/ZText.svelte';
-  import { givenNames, explainCtxOf } from '../../lib/spec/helpers';
+  import { givenNames, explainCtxOf, schemaNameError } from '../../lib/spec/helpers';
+  import { live } from '../../lib/spec/live.svelte';
 
   let { spec }: { spec: SpecDoc } = $props();
 
   const given = $derived(givenNames(spec.given));
   const ctx = $derived(explainCtxOf(spec));
   const schemas = $derived([spec.state, ...(spec.init ? [spec.init] : []), ...spec.operations]);
+  const showGiven = $derived(spec.given.replace(/[\s[\]]/g, '') !== '');
+
+  /** Lines (0-based) of a section that have errors. */
+  function errorLines(text: string, schemaId: string, part: SectionPart): Set<number> {
+    const lines = new Set<number>();
+    const lineAt = (offset: number) => text.slice(0, Math.max(0, offset)).split('\n').length - 1;
+    for (const d of live.diagnostics) {
+      if (d.severity !== 'error' || d.section.schemaId !== schemaId || d.section.part !== part) continue;
+      const a = lineAt(d.from);
+      const b = lineAt(Math.max(d.from, d.to - 1));
+      for (let i = a; i <= b; i++) lines.add(i);
+    }
+    return lines;
+  }
+
+  /** Nothing written yet (operations: no predicates yet). */
+  const incomplete = (s: SchemaDoc) => (s.role === 'operation' ? !s.preds.trim() : !s.decls.trim() && !s.preds.trim());
+
+  const rows = $derived(
+    schemas.map((s) => ({
+      s,
+      nameError: schemaNameError(spec, s.id, s.name),
+      declErrors: errorLines(s.decls, s.id, 'decls'),
+      predErrors: errorLines(s.preds, s.id, 'preds'),
+      incomplete: incomplete(s),
+    })),
+  );
+  const givenErrors = $derived(errorLines(spec.given, 'types', 'given'));
+  const hasErrors = $derived(
+    givenErrors.size > 0 || rows.some((r) => r.nameError || r.declErrors.size || r.predErrors.size),
+  );
+  const note = $derived(
+    hasErrors ? 'Some schemas have errors.' : rows.some((r) => r.incomplete) ? 'Some schemas are incomplete.' : '',
+  );
 
   function print() {
     const old = document.title;
@@ -33,11 +68,24 @@
           PDF
         </button>
       </header>
-      {#if spec.given.trim()}
-        <div class="given"><ZText text={spec.given} givenSets={given} {ctx} block /></div>
+      {#if note}<p class="note">{note}</p>{/if}
+      {#if showGiven}
+        <div class="given">
+          <ZText text={spec.given} givenSets={given} {ctx} block class={givenErrors.size ? 'err-line' : ''} />
+        </div>
       {/if}
-      {#each schemas as s (s.id)}
-        <StaticSchema name={s.name} decls={s.decls} preds={s.preds} givenSets={given} {ctx} />
+      {#each rows as r (r.s.id)}
+        <StaticSchema
+          name={r.s.name}
+          decls={r.s.decls}
+          preds={r.s.preds}
+          givenSets={given}
+          {ctx}
+          nameError={r.nameError}
+          incomplete={r.incomplete}
+          declErrors={r.declErrors}
+          predErrors={r.predErrors}
+        />
       {/each}
     </article>
   {/snippet}
@@ -46,8 +94,20 @@
 <style>
   .spec-doc {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 34px;
     max-width: 820px;
+    min-width: 0;
+  }
+  .note {
+    margin: -18px 0 0;
+    font-size: 0.9rem;
+    color: var(--ui-fg);
+  }
+  .given :global(.err-line) {
+    text-decoration: underline wavy var(--error);
+    text-decoration-skip-ink: none;
+    text-underline-offset: 4px;
   }
   header {
     display: flex;
@@ -57,6 +117,8 @@
   }
   h1 {
     margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-family: var(--font-z);
     font-weight: 400;
     font-size: clamp(1.6rem, 3vw, 2.2rem);
@@ -92,7 +154,7 @@
     stroke-linejoin: round;
   }
   .given :global(.z-text) {
-    font-size: 1.3rem;
+    font-size: calc(1.3rem * var(--z-scale, 1));
   }
 
   @media print {
@@ -112,7 +174,8 @@
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
-    .pdf {
+    .pdf,
+    .note {
       display: none;
     }
   }

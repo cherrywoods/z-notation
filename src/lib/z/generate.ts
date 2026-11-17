@@ -66,6 +66,8 @@ function guard<T>(f: () => T, fallback: () => T): T {
 }
 
 const NO_EXAMPLE = 'No example right now.';
+/** The search is limited to small values, so failing to find an example proves nothing. */
+const NOT_FOUND = 'No example found with small values.';
 
 interface Prepared {
   u: Universe;
@@ -134,7 +136,10 @@ function buildUniverse(spec: SpecDoc, an: Analysis, seed: number): { u: Universe
         .sort((a, b) => (a.ord ?? 0) - (b.ord ?? 0));
     }
   }
-  return { u: { carriers, intMin: INT_MIN, intMax: INT_MAX }, fixedRaw };
+  const infinite = (spec.infinite ?? []).filter((n) => an.givenSets.includes(n));
+  // numbers of the spec and their neighbours are tried when ℕ / ℤ are listed
+  const probes = [...new Set(specConstants(an).flatMap((n) => [n - 1, n, n + 1]))];
+  return { u: { carriers, intMin: INT_MIN, intMax: INT_MAX, infinite, probes }, fixedRaw };
 }
 
 /** Position of `train3` in the default carrier of TRAIN (2), or null. */
@@ -253,8 +258,9 @@ function shown(name: string, value: Value | undefined, extra: Partial<ShownVar> 
 }
 
 function check(p: PredInfo, env: ReadonlyMap<string, Value>, u: Universe): PredCheck {
-  const { result, message } = truth(p.term, new Map(env), u);
+  const { result, message, bounded } = truth(p.term, new Map(env), u);
   const c: PredCheck = { origin: p.origin, text: printTerm(p.term), result };
+  if (bounded) c.bounded = true;
   if (p.section) c.section = p.section;
   if (p.index !== undefined) c.index = p.index;
   if (message) c.message = message;
@@ -281,7 +287,7 @@ function stateExample(spec: SpecDoc, an: Analysis, seed: number): StateExample {
     penalizeEmpty: true,
     statuses: false,
     fixedName: (v) => (v.role === 'state' ? v.base : null),
-    fail: 'No state satisfies all predicates.',
+    fail: NOT_FOUND,
   });
 }
 
@@ -300,11 +306,12 @@ function initExample(spec: SpecDoc, an: Analysis, seed: number): StateExample {
   const prep = prepare(spec, an, seed);
   const init = an.schemas.find((s) => s.role === 'init');
   if (!init) return { kind: 'state', ok: false, message: 'There is no Init schema.' };
+  if (!init.initImport) return { kind: 'state', ok: false, message: 'Init does not import the state yet.' };
   return schemaExample(prep, init, makeRng(seed, 'init'), {
     penalizeEmpty: false,
     statuses: true,
     fixedName: (v) => (v.role === 'state' || v.role === 'state′' ? v.base : null),
-    fail: 'No initial state satisfies all predicates.',
+    fail: 'No initial state found with small values.',
   });
 }
 
@@ -347,7 +354,7 @@ function schemaExample(
     if (!plan || !problem) return {};
     if (!isDetermined(plan, name) && now() < prep.deadline) {
       const w = findWitness(problem, name, res.env, rng, prep.deadline);
-      if (w) return { status: 'free', alternative: printValue(w) };
+      if (w) return { status: 'free', alternative: printValue(w), alternativeValue: w };
     }
     return { status: 'computed' };
   };
@@ -480,7 +487,7 @@ function applicableCase(x: OpParts, rng: Rng): OpExample {
         kind: 'op',
         ok: false,
         reason: 'no-before',
-        message: 'No state satisfies the invariant.',
+        message: 'No example state found with small values.',
         failed: invBad.map((p) => check(p, A.env, prep.u)),
       };
     }
@@ -488,7 +495,7 @@ function applicableCase(x: OpParts, rng: Rng): OpExample {
       kind: 'op',
       ok: false,
       reason: 'no-input',
-      message: `No state ${x.inputs.length ? `and input${x.inputs.length > 1 ? 's' : ''} satisfy` : 'satisfies'} the precondition${x.pres.length > 1 ? 's' : ''}.`,
+      message: `No example found with small values in which the precondition${x.pres.length > 1 ? 's hold' : ' holds'}.`,
       before: beforeShown(),
       inputs: inputsShown(),
       failed: failed.map((p) => check(p, A.env, prep.u)),
@@ -511,15 +518,16 @@ function applicableCase(x: OpParts, rng: Rng): OpExample {
   const broken = failedPreds.find((p) => p.origin === 'invariant′');
   const xi = failedPreds.find((p) => p.origin === 'xi');
   let message: string;
+  // (only the Ξ conflict is certain; otherwise larger values might still work)
   if (xi) message = `No after-state fits: Ξ keeps ${q(printTerm(xi.term))}.`;
-  else if (broken) message = `No after-state fits: the effect breaks ${q(printTerm(broken.term))}.`;
-  else if (failedPreds.length) message = `No after-state fits: ${q(printTerm(failedPreds[0].term))} cannot hold.`;
+  else if (broken) message = `No after-state found with small values: ${q(printTerm(broken.term))} fails.`;
+  else if (failedPreds.length) message = `No after-state found with small values: ${q(printTerm(failedPreds[0].term))} fails.`;
   else if (B.badDecls.length) {
     const v = [...x.after, ...x.outputs].find((w) => w.info.name === B.badDecls[0]);
     message = v
-      ? `No after-state fits: ${v.info.name} would not be in ${printTerm(v.info.declared)}.`
-      : 'No after-state fits.';
-  } else message = 'No after-state fits.';
+      ? `No after-state found with small values: ${v.info.name} would not be in ${printTerm(v.info.declared)}.`
+      : 'No after-state found with small values.';
+  } else message = 'No after-state found with small values.';
   return {
     kind: 'op',
     ok: false,
@@ -575,7 +583,7 @@ function applicableResult(x: OpParts, env: Map<string, Value>, fixedNames: Set<s
     const name = v.info.name;
     if (!isDetermined(plan, name) && now() < prep.deadline) {
       const w = findWitness(problem, name, env, rng, prep.deadline);
-      if (w) return { status: 'free', alternative: printValue(w) };
+      if (w) return { status: 'free', alternative: printValue(w), alternativeValue: w };
     }
     const val = env.get(name);
     const old = env.get(v.info.base);
@@ -633,5 +641,5 @@ function blockedCase(x: OpParts, rng: Rng): OpExample {
       failed: pres.map((p) => check(p, env, prep.u)).filter((c) => c.result !== true),
     };
   }
-  return { kind: 'op', ok: false, reason: 'no-blocked', message: 'No blocked case found.' };
+  return { kind: 'op', ok: false, reason: 'no-blocked', message: 'No blocked case found with small values.' };
 }

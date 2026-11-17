@@ -70,4 +70,9 @@
   .maplet {
     white-space: pre;
   }
+  /* an extremely long value may break rather than widen the panel */
+  .atom {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 </style>

@@ -300,17 +300,27 @@ describe('parsePreds: lines and continuation', () => {
 
 describe('parseDecls', () => {
   it('parses variable declarations, Δ/Ξ and schema imports', () => {
-    const r = parseDecls('ΔLibrary\nbook?, other? : BOOK; member! : MEMBER\nΞ Library\nLibrary′\nrx : PATIENT ⇸ (DRUG ⇸ ℕ₁)');
+    const r = parseDecls('ΔLibrary\nbook? : BOOK\nmember! : MEMBER\nΞ Library\nLibrary′\nrx : PATIENT ⇸ (DRUG ⇸ ℕ₁)');
     expect(r.diagnostics).toEqual([]);
     expect(r.decls.map((d) => (d.kind === 'var' ? `${d.names.map((n) => n.name).join(',')}:${sx(d.type)}` : `${d.kind} ${d.schema}`))).toEqual([
       'delta Library',
-      'book?,other?:BOOK',
+      'book?:BOOK',
       'member!:MEMBER',
       'xi Library',
       'include Library′',
       'rx:(⇸ PATIENT (⇸ DRUG ℕ₁))',
     ]);
     expect(r.decls[0].span).toEqual({ from: 0, to: 8 });
+  });
+
+  it('allows only one variable per declaration line', () => {
+    const r = parseDecls('allergies, prescribed : PATIENT ↔ DRUG\npatients : ℙ PATIENT; ward : WARD');
+    expect(r.diagnostics.map((d) => d.message)).toEqual([
+      'Declare one variable per line: ‘allergies : PATIENT ↔ DRUG’ and ‘prescribed : PATIENT ↔ DRUG’ on separate lines.',
+      'Declare one variable per line: put this declaration on its own line.',
+    ]);
+    // the declarations are kept, so the names cause no follow-up errors
+    expect(r.decls.length).toBe(3);
   });
 
   it('ignores empty lines and continues multi-line types', () => {
@@ -338,36 +348,80 @@ describe('parseDecls', () => {
   });
 });
 
-describe('real numbers (ℝ) and decimals', () => {
+describe('numbers', () => {
   const toks = (src: string) => lex(src).filter((t) => t.kind !== 'eof').map((t) => `${t.kind}:${t.value}`);
 
-  it('lexes decimal literals and ℝ', () => {
-    expect(toks('0.25 + 36.5')).toEqual(['number:0.25', 'sym:+', 'number:36.5']);
+  it('lexes decimals as one token (to explain them), ranges and ℝ', () => {
+    expect(toks('0.25 + 3')).toEqual(['number:0.25', 'sym:+', 'number:3']);
     expect(toks('1..5')).toEqual(['number:1', 'sym:..', 'number:5']);
-    expect(toks('1.5..2')).toEqual(['number:1.5', 'sym:..', 'number:2']);
     expect(toks('2.Feb')).toEqual(['number:2', 'error:.', 'ident:Feb']); // only matters in example values
-    expect(toks('x : ℝ')).toEqual(['ident:x', 'sym::', 'sym:ℝ']);
-    expect(lex('ℝ')[0].symbolId).toBe('real');
-    expect(toks('ℝx')).toEqual(['sym:ℝ', 'ident:x']); // ℝ is not a letter of a name
+    expect(toks('ℝx')).toEqual(['error:ℝ', 'ident:x']); // ℝ never becomes part of a name
   });
 
-  it('parses ℝ and decimal numbers', () => {
-    expect(tree('t ∈ ℝ')).toBe('(∈ t ℝ)');
-    expect(tree('∀ temperature : SENSOR ⇸ ℝ • true')).toBe('(∀ [temperature:(⇸ SENSOR ℝ)] true)');
-    expect(tree('t = -1.5')).toBe('(= t -1.5)');
-    expect(tree('0.25 + 1 * 2.5')).toBe('(+ 0.25 (* 1 2.5))');
-    expect(tree('x ∈ 0.5 .. 2')).toBe('(∈ x (.. 0.5 2))');
-    expect(parseTerm('t = 36.5').term).toMatchObject({ right: { kind: 'num', value: 36.5, span: { from: 4, to: 8 } } });
-    expect(parseDecls('t? : ℝ\ntemps : ℙ ℝ').diagnostics).toEqual([]);
-  });
-
-  it('explains badly written decimals and division', () => {
-    expect(errorOf('x = .5')).toBe('Write ‘0.5’ instead of ‘.5’');
-    expect(errorOf('x = 1.')).toBe('A decimal number needs digits after the point, e.g. ‘1.5’');
-    expect(errorOf('x = 1,5')).toBe('Write decimal numbers with a point: ‘1.5’');
+  it('accepts only whole numbers', () => {
+    for (const src of ['x = 0.25', 'x = .5', 'x = 1.', 'x = 1,5', 'x = -1.5']) expect(errorOf(src), src).toBe('Only whole numbers are part of this tutorial.');
     expect(tree('{1,5} = {1, 5}')).toBe('(= {1 5} {1 5})'); // inside braces a comma separates elements
+    expect(errorOf('t ∈ ℝ')).toBe('‘ℝ’ (real numbers) is not part of this tutorial — use ℤ (whole numbers)');
     expect(errorOf('x = y / 2')).toBe('Division ‘/’ is not part of this tutorial — use ‘div’ (division of whole numbers)');
-    expect(parseGiven('[ℝ]').diagnostics.map((d) => d.message)).toEqual(['‘ℝ’ is built in — no need to declare it']);
+  });
+
+  it('rejects literals that cannot be represented exactly', () => {
+    expect(tree('n = 9007199254740991')).toBe('(= n 9007199254740991)');
+    expect(tree('n = -9007199254740991')).toBe('(= n -9007199254740991)');
+    for (const src of ['n = 99999999999999999999', 'n = -99999999999999999999', 'n = 9007199254740992']) {
+      expect(errorOf(src), src).toBe('Numbers this large are not supported here.');
+    }
+    expect(parseTerm('n = 99999999999999999999').diagnostics[0]).toMatchObject({ from: 4, to: 24 });
+  });
+});
+
+describe('constructs that are not part of the tutorial', () => {
+  it.each([
+    ['f′ = f ⊕ {x ↦ y}', '‘⊕’ (override) is not part of this tutorial — use ∪ and ∖ instead'],
+    ['S ◁ R = R', '‘◁’ (domain restriction) is not part of this tutorial'],
+    ['S ⩤ R = R', '‘⩤’ (domain subtraction) is not part of this tutorial'],
+    ['R ▷ S = R', 'Range restriction ‘▷’ is not part of this tutorial'],
+    ['R ⩥ S = R', 'Range subtraction ‘⩥’ is not part of this tutorial'],
+    ['R⦇{x}⦈ = ∅', '‘⦇ ⦈’ (relational image) is not part of this tutorial'],
+    ['R∼ = R', 'Relational inverse ‘∼’ is not part of this tutorial'],
+    ['R⁻¹ = R', 'Relational inverse (‘⁻¹’, ‘∼’) is not part of this tutorial'],
+    ['R ⨾ S = T', 'Relational composition ‘⨾’ is not part of this tutorial'],
+    ['f ∈ A ↣ B', '‘↣’ (total injection) is not part of this tutorial — use ‘→’'],
+    ['f ∈ A ⤔ B', '‘⤔’ (partial injection) is not part of this tutorial — use ‘⇸’'],
+    ['f ∈ A ↠ B', '‘↠’ (surjection) is not part of this tutorial — use ‘→’'],
+    ['f ∈ A ⤀ B', '‘⤀’ (partial surjection) is not part of this tutorial — use ‘⇸’'],
+    ['f ∈ A ⤖ B', '‘⤖’ (bijection) is not part of this tutorial — use ‘→’'],
+    ['f ∈ A ⇻ B', '‘⇻’ (finite function) is not part of this tutorial — use ‘⇸’'],
+    ['f ∈ A ⤗ B', '‘⤗’ is not part of this tutorial — use ⇸, → or ↔'],
+    ['S ∈ ℙ₁ A', '‘ℙ₁’ (non-empty subsets) is not part of this tutorial — use ℙ and add ‘S ≠ ∅’'],
+    ['s = ⟨a, b⟩', 'Sequences (‘seq’, ‘⟨ ⟩’) are not part of this tutorial'],
+    ['∃₁ x : S • P', '‘∃₁’ (exactly one) is not part of this tutorial'],
+    ['x = μ y : S | P', '‘μ’ (definite description) is not part of this tutorial'],
+    ['f = λ x : S • x', '‘λ’ (lambda) is not part of this tutorial'],
+    ['x ∈ ⋃ S', 'Generalised union ‘⋃’ is not part of this tutorial'],
+    ['x ∈ ⋂ S', 'Generalised intersection ‘⋂’ is not part of this tutorial'],
+    ['x = if p then a else b', '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …'],
+    ['let y == x + 1 • y > 0', '‘let’ is not part of this tutorial'],
+  ])('%s', (src, message) => {
+    const r = parseTerm(src);
+    expect(r.term).toBeNull();
+    expect(r.diagnostics[0].message).toContain(message);
+    expect(r.diagnostics[0].message).toContain('not part of this tutorial');
+  });
+
+  it('recognises ASCII spellings of the arrows', () => {
+    expect(errorOf('f ∈ A >-> B')).toMatch(/^‘↣’/);
+    expect(errorOf('f ∈ A >+> B')).toMatch(/^‘⤔’/);
+    expect(errorOf('f ∈ A ->> B')).toMatch(/^‘↠’/);
+    expect(errorOf('f ∈ A +->> B')).toMatch(/^‘⤀’/);
+    expect(errorOf('f ∈ A >->> B')).toMatch(/^‘⤖’/);
+    expect(tree('f ∈ A -> B')).toBe('(∈ f (→ A B))');
+    expect(tree('a > -b')).toBe('(> a (neg b))');
+  });
+
+  it('points at the construct', () => {
+    expect(parseTerm('S ∈ ℙ₁ A').diagnostics[0]).toMatchObject({ from: 4, to: 6 });
+    expect(parseTerm('∃₁ x : S • P').diagnostics[0]).toMatchObject({ from: 0, to: 2 });
   });
 });
 
@@ -378,6 +432,24 @@ describe('parseGiven', () => {
     expect(r.names.map((n) => n.name)).toEqual(['NAME', 'DATE', 'ROOM']);
     expect(r.names[1].span).toEqual({ from: 7, to: 11 });
     expect(r.decl?.span).toEqual({ from: 0, to: 19 });
+  });
+
+  it('keeps reading names after a mistake', () => {
+    const names = (src: string) => parseGiven(src).names.map((n) => n.name);
+    const msgs = (src: string) => parseGiven(src).diagnostics.map((d) => d.message);
+    expect(names('[PATIENT DRUG]')).toEqual(['PATIENT', 'DRUG']);
+    expect(msgs('[PATIENT DRUG]')).toEqual(['Separate the names with ‘,’']);
+    expect(names('[PATIENT,,DRUG]')).toEqual(['PATIENT', 'DRUG']);
+    expect(msgs('[PATIENT,,DRUG]')).toEqual(['Expected a name between the commas']);
+    expect(names('[A, ℕ, B]')).toEqual(['A', 'B']);
+    expect(names('[A; B]')).toEqual(['A', 'B']);
+  });
+
+  it('does not define built-in or unsupported sets', () => {
+    expect(parseGiven('[ℕ]')).toMatchObject({ decl: null, names: [] });
+    expect(parseGiven('[ℕ]').diagnostics.map((d) => d.message)).toEqual(['‘ℕ’ is built in — no need to declare it']);
+    expect(parseGiven('[ℝ]')).toMatchObject({ decl: null, names: [] });
+    expect(parseGiven('[ℝ]').diagnostics.map((d) => d.message)).toEqual(['‘ℝ’ (real numbers) is not part of this tutorial — use ℤ (whole numbers)']);
   });
 
   it('accepts an empty text', () => {

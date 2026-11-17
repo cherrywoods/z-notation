@@ -12,8 +12,8 @@ export type IntScale = 'small' | 'money';
 
 export type Dom =
   | { k: 'finite'; elems: readonly Value[] }
-  /** Numbers in [lo, hi]: sampled from `cands`, moved by ±step; `real`: decimals allowed (ℝ). */
-  | { k: 'int'; lo: number; hi: number; cands: readonly number[]; step: number; real?: boolean }
+  /** Whole numbers in [lo, hi]: sampled from `cands`, moved by ±step. */
+  | { k: 'int'; lo: number; hi: number; cands: readonly number[]; step: number }
   | { k: 'set'; base: Dom }
   | { k: 'rel'; fn: 'rel' | 'pfun' | 'tfun'; from: Dom; to: Dom }
   | { k: 'tuple'; parts: Dom[] };
@@ -56,7 +56,6 @@ export function compileDom(t: Term, u: Universe, scale: IntScale, consts: readon
       return null;
     }
     case 'builtinSet':
-      if (t.set === 'ℝ') return realDom(scale, consts);
       return intDom(t.set === 'ℕ' ? 0 : t.set === 'ℕ₁' ? 1 : -Infinity, Infinity, scale, consts);
     case 'unop':
       if (t.op === 'ℙ') {
@@ -75,9 +74,7 @@ export function compileDom(t: Term, u: Universe, scale: IntScale, consts: readon
         try {
           const lo = evalTerm(t.left, new Map(), u);
           const hi = evalTerm(t.right, new Map(), u);
-          // a .. b contains the whole numbers from a to b
-          const [l, h] = lo.k === 'int' && hi.k === 'int' ? [Math.ceil(lo.v), Math.floor(hi.v)] : [1, 0];
-          if (l <= h) return intDom(l, h, scale, consts);
+          if (lo.k === 'int' && hi.k === 'int' && lo.v <= hi.v) return intDom(lo.v, hi.v, scale, consts);
         } catch {
           /* fall through */
         }
@@ -100,24 +97,14 @@ export function compileDom(t: Term, u: Universe, scale: IntScale, consts: readon
   return null;
 }
 
-/** Readable decimals for ℝ (36.5, 0.25, -1.5, …), money-like for amounts. */
-function realDom(scale: IntScale, consts: readonly number[]): Dom {
-  const base =
-    scale === 'money'
-      ? [-20.5, -5.25, 0, 0.99, 2.5, 4.75, 10, 12.5, 19.99, 49.5, 100]
-      : [-1.5, -0.5, 0, 0.25, 0.5, 1, 1.5, 2.25, 3.5, 7.5, 12.5, 36.5];
-  const step = scale === 'money' ? 0.5 : 0.25;
-  return { k: 'int', lo: -Infinity, hi: Infinity, cands: withConsts(base, consts, step, -Infinity, Infinity, true), step, real: true };
-}
-
-/** Add the spec's constants c and c ± step (inside [lo, hi]; whole numbers unless `real`). */
-function withConsts(cands: number[], consts: readonly number[], step: number, lo: number, hi: number, real: boolean): number[] {
+/**
+ * Add the numbers written in the spec, c and c ± step (inside [lo, hi]), so that
+ * bounds like `x > 1000` can be met (by 1001).
+ */
+function withConsts(cands: number[], consts: readonly number[], step: number, lo: number, hi: number): number[] {
   const out = new Set(cands);
   for (const c of consts.slice(0, 12)) {
-    for (const x of [c - step, c, c + step]) {
-      const n = int(x).v; // normalised (no rounding noise)
-      if (n >= lo && n <= hi && (real || Number.isInteger(n))) out.add(n);
-    }
+    for (const n of [c - step, c, c + step, c - 1, c + 1]) if (n >= lo && n <= hi) out.add(n);
   }
   return [...out].sort((a, b) => a - b);
 }
@@ -145,8 +132,7 @@ function intDom(lo: number, hi: number, scale: IntScale, consts: readonly number
     }
   }
   const step = scale === 'money' ? 10 : 1;
-  const extra = consts.map(Math.round); // whole numbers near the constants (`x > 2.5` → 2, 3)
-  return { k: 'int', lo, hi, cands: withConsts(cands, extra, step, lo, hi, false), step };
+  return { k: 'int', lo, hi, cands: withConsts(cands, consts, step, lo, hi), step };
 }
 
 export const isSetDom = (d: Dom): d is SetDom => d.k === 'set' || d.k === 'rel';

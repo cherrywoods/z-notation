@@ -2,7 +2,7 @@
 //
 //   #/                       start page
 //   #/present                presentation mode (QR code) over the start page
-//   #/t/<topicId>/<step>     tutorial; step = 'types' | 'state' | '<operation id>' | 'spec'
+//   #/t/<topicId>/<step>     tutorial; step = 'about' | 'types' | 'state' | '<operation id>' | 'init' | 'spec'
 //
 // Browser back/forward works: every navigation is a history entry (unless `replace`).
 
@@ -24,7 +24,7 @@ export function parse(hash: string): Route {
       }
     });
   if (parts[0] === 'present') return { name: 'present' };
-  if (parts[0] === 't' && parts[1]) return { name: 'tutorial', topicId: parts[1], step: parts[2] || 'types' };
+  if (parts[0] === 't' && parts[1]) return { name: 'tutorial', topicId: parts[1], step: parts[2] || 'about' };
   return { name: 'start' };
 }
 

@@ -1,9 +1,9 @@
-// The tutorial steps of a spec: Types → State → one per operation → Init (if any) → Spec.
+// The tutorial steps of a spec: System → Types → State → one per operation → Init (if any) → Spec.
 
 import type { OpKind, SpecDoc } from '../../lib/spec/model';
 
 export interface StepInfo {
-  /** Route segment: 'types' | 'state' | operation id ('op-…') | 'init' | 'spec'. */
+  /** Route segment: 'about' | 'types' | 'state' | operation id ('op-…') | 'init' | 'spec'. */
   id: string;
   label: string;
   /** Operations only: Ξ (query) or Δ (update) badge. */
@@ -12,6 +12,7 @@ export interface StepInfo {
 
 export function stepsOf(spec: SpecDoc): StepInfo[] {
   return [
+    { id: 'about', label: 'System' },
     { id: 'types', label: 'Types' },
     { id: 'state', label: 'State' },
     ...spec.operations.map((o) => ({ id: o.id, label: o.name || 'Operation', opKind: o.opKind })),

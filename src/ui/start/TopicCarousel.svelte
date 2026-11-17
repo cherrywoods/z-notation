@@ -266,8 +266,9 @@
     overscroll-behavior-x: contain;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
-    /* room for the selected ring and shadow */
-    padding: 16px 0;
+    /* room for the selected ring and its all-around shadow (not clipped by the scroller) */
+    padding: 72px 0;
+    margin: -56px 0;
   }
   .scroller::-webkit-scrollbar {
     display: none;

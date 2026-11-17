@@ -3,8 +3,13 @@
   import SchemaBox from '../editor/SchemaBox.svelte';
   import SymbolLibrary from '../editor/SymbolLibrary.svelte';
   import Prompt from './Prompt.svelte';
-  import { givenNames, explainCtxOf } from '../../lib/spec/helpers';
+  import GoalList from './GoalList.svelte';
+  import ToolLayout from './ToolLayout.svelte';
+  import { X } from '@lucide/svelte';
+  import InlineConfirm from '../shell/InlineConfirm.svelte';
+  import { givenNames, explainCtxOf, schemaNameError } from '../../lib/spec/helpers';
   import { live } from '../../lib/spec/live.svelte';
+  import { store } from '../../lib/spec/store.svelte';
   import type { SpecDoc } from '../../lib/spec/model';
 
   interface Props {
@@ -15,55 +20,44 @@
   }
   let { spec, schemaId, onremove }: Props = $props();
 
-  const op = $derived(spec.operations.find((o) => o.id === schemaId));
-  const given = $derived(givenNames(spec.given));
-  const ctx = $derived(explainCtxOf(spec));
+  // edits go to the store's state (not through the prop)
+  const doc = $derived(store.current ?? spec);
+  const op = $derived(doc.operations.find((o) => o.id === schemaId));
+  const given = $derived(givenNames(doc.given));
+  const ctx = $derived(explainCtxOf(doc));
 </script>
 
 {#if op}
-  <div class="step">
-    <Prompt text={op.prompt} />
-    <div class="library"><SymbolLibrary stateName={spec.state.name} explainCtx={ctx} /></div>
+  <ToolLayout>
+    {#snippet bar()}
+      <SymbolLibrary vertical stateName={doc.state.name} explainCtx={ctx} />
+    {/snippet}
+    <Prompt large text={op.opKind === 'query' ? 'Define an operation that reads the state.' : 'Define an operation that changes the state.'} />
+    <GoalList goals={live.goalsFor(op.id)} />
     <SchemaBox
       bind:name={op.name}
       bind:decls={op.decls}
       bind:preds={op.preds}
+      nameError={schemaNameError(doc, op.id, op.name)}
       givenSets={given}
       explainCtx={ctx}
       declDiagnostics={live.diagnosticsFor(op.id, 'decls')}
       predDiagnostics={live.diagnosticsFor(op.id, 'preds')}
-      declPlaceholder={op.opKind === 'query' ? `Ξ${spec.state.name}` : `Δ${spec.state.name}`}
-      predPlaceholder="book? ∉ onLoan"
+      declPlaceholder={'Import the state\nAdd inputs and outputs'}
+      predPlaceholder={'Add preconditions\nAdd postconditions'}
     />
-    {#if onremove && spec.operations.length > 1}
-      <button type="button" class="ghost" onclick={onremove} aria-label="Remove this operation" title="Remove">✕</button>
+    {#if onremove && doc.operations.length > 1}
+      <div class="remove">
+        <InlineConfirm label="Remove this operation" question="Remove?" action="Remove" onconfirm={onremove}>
+          {#snippet icon()}<X size={16} />{/snippet}
+        </InlineConfirm>
+      </div>
     {/if}
-  </div>
+  </ToolLayout>
 {/if}
 
 <style>
-  .step {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 18px;
-  }
-  .library {
-    position: sticky;
-    top: calc(var(--header-h) + 8px);
-    z-index: 5;
-  }
-  .ghost {
+  .remove {
     justify-self: end;
-    border: none;
-    background: transparent;
-    color: var(--ui-fg);
-    border-radius: 999px;
-    padding: 6px 12px;
-    font-size: 0.82rem;
-    cursor: pointer;
-  }
-  .ghost:hover {
-    color: var(--fg);
-    background: var(--bg-hover);
   }
 </style>

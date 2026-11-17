@@ -114,9 +114,10 @@
 
 <style>
   .panel {
-    background: var(--ui-bg);
-    border: 1px solid var(--ui-border);
+    background: var(--bg-sunken);
+    border: 1px solid var(--edge-sunken);
     border-radius: var(--radius);
+    box-shadow: var(--shadow-sunken);
     padding: 12px 18px 14px;
   }
   header {
@@ -152,7 +153,7 @@
     color: var(--fg);
   }
   .fact :global(.z-text) {
-    font-size: 1.05rem;
+    font-size: calc(1.05rem * var(--z-scale, 1));
   }
   .fact.plain {
     cursor: default;
@@ -194,7 +195,7 @@
     text-align: center;
   }
   .expr :global(.z-text) {
-    font-size: 1rem;
+    font-size: calc(1rem * var(--z-scale, 1));
   }
   .why {
     justify-self: end;

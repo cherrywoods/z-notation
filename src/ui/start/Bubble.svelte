@@ -20,6 +20,8 @@
     index?: number;
     /** Carousel clones: hidden from assistive tech and the tab order (still clickable). */
     clone?: boolean;
+    /** Roving tab stop (ring): -1 takes the bubble out of the tab order. */
+    tabindex?: number;
     onclick?: () => void;
     onhover?: (hovered: boolean) => void;
     onsubmit?: () => void;
@@ -37,6 +39,7 @@
     text = '',
     index = -1,
     clone = false,
+    tabindex = 0,
     onclick,
     onhover,
     onsubmit,
@@ -102,7 +105,7 @@
       type="button"
       class="face"
       aria-pressed={selected}
-      tabindex={clone ? -1 : undefined}
+      tabindex={clone ? -1 : tabindex}
       aria-label={custom ? `Own topic${text.trim() ? `: ${text.trim()}` : ''}` : topic.title}
       onclick={() => onclick?.()}
     >
@@ -147,8 +150,8 @@
     padding: 0 calc(var(--d) * 0.1);
     background: var(--bg);
     color: var(--ui-fg);
-    border: 1px solid var(--ui-border);
-    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--edge-raised);
+    box-shadow: var(--shadow-float);
     cursor: pointer;
     font: inherit;
     transition:
@@ -212,7 +215,7 @@
     border: 1px solid var(--fg);
     box-shadow:
       0 0 0 1.5px var(--fg),
-      var(--shadow-md);
+      var(--shadow-float-high);
   }
   @media (hover: hover) {
     .grow:hover {
@@ -225,13 +228,13 @@
     .bubble:hover .face {
       color: var(--fg);
       border-color: var(--fg);
-      box-shadow: var(--shadow-md);
+      box-shadow: var(--shadow-float-high);
     }
     .bubble.selected:hover .face {
       border-color: var(--fg);
       box-shadow:
         0 0 0 1.5px var(--fg),
-        var(--shadow-lg);
+        var(--shadow-float-high);
     }
   }
   .face:focus-visible {

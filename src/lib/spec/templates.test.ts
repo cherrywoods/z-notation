@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { analyseSpec } from '../z/index';
 import { TOPICS, createSpec } from './topics';
 import type { SpecDoc } from './model';
+import { visibleDiagnostics } from './helpers';
 
 const raw = import.meta.glob('/templates/*.json', { eager: true, import: 'default' }) as Record<string, any>;
 
@@ -11,6 +12,7 @@ function fullSpec(id: string): SpecDoc {
   const t = Object.entries(raw).find(([p]) => p.endsWith(`/${id}.json`))![1];
   const spec = createSpec(id);
   const all = (lines: { text: string }[] = []) => lines.map((l) => l.text).join('\n');
+  spec.given = `[${t.givenSets.map((g: { name: string }) => g.name).join(', ')}]`;
   spec.state.decls = all(t.state.declarations);
   spec.state.preds = all(t.state.predicates);
   if (spec.init && t.init) {
@@ -25,14 +27,14 @@ function fullSpec(id: string): SpecDoc {
 }
 
 const errorsOf = (spec: SpecDoc) =>
-  analyseSpec(spec)
-    .diagnostics.filter((d) => d.severity === 'error')
+  visibleDiagnostics(spec, analyseSpec(spec).diagnostics)
+    .filter((d) => d.severity === 'error')
     .map((d) => `${d.section.schemaId}:${d.section.part} ${d.message}`);
 
 describe('templates', () => {
   it('there are six', () => expect(TOPICS.length).toBe(6));
   for (const t of TOPICS) {
-    it(`${t.id}: student view has no errors`, () => expect(errorsOf(createSpec(t.id))).toEqual([]));
+    it(`${t.id}: bare start shows no errors`, () => expect(errorsOf(createSpec(t.id))).toEqual([]));
     it(`${t.id}: full spec has no errors`, () => expect(errorsOf(fullSpec(t.id))).toEqual([]));
   }
 });

@@ -1,6 +1,7 @@
 <!--
-  Big round arrow button, fixed in a bottom corner. `next` is solid black, `back` is white.
+  Big round arrow button, fixed in a bottom corner. `next` is solid, `back` is white.
   With `href` it renders a link (in-app hash links go through the router).
+  `docked`: on phones the button sits in its parent (the tutorial's bottom bar) instead.
 -->
 <script lang="ts">
   import { ArrowLeft, ArrowRight } from '@lucide/svelte';
@@ -13,15 +14,16 @@
     href?: string;
     onclick?: (e: MouseEvent) => void;
     visible?: boolean;
+    docked?: boolean;
   }
-  let { dir, label, href, onclick, visible = true }: Props = $props();
+  let { dir, label, href, onclick, visible = true, docked = false }: Props = $props();
 
   const Icon = $derived(dir === 'next' ? ArrowRight : ArrowLeft);
   const dx = $derived(dir === 'next' ? 16 : -16);
 </script>
 
 {#if visible}
-  <div class="corner {dir}" transition:fly={{ x: dx, duration: 260, easing: cubicOut }}>
+  <div class="corner {dir}" class:docked transition:fly={{ x: dx, duration: 260, easing: cubicOut }}>
     {#if href}
       <a class="arrow {dir}" {href} {onclick} aria-label={label} title={label}>
         <Icon size={26} strokeWidth={2} />
@@ -100,6 +102,14 @@
   @media (max-width: 600px) {
     .arrow {
       --arrow-size: 56px;
+    }
+  }
+  @media (max-width: 640px) {
+    .corner.docked {
+      position: static;
+    }
+    .docked .arrow {
+      --arrow-size: 52px;
     }
   }
   @media print {

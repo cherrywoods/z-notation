@@ -9,7 +9,6 @@ import {
   BOOL,
   ERROR,
   INT,
-  REAL,
   describeType,
   pair,
   power,
@@ -191,16 +190,6 @@ export class TypeChecker {
     return this.unifier.canUnify(a, b);
   }
 
-  /** The numeric type, flagged as ℝ if any of `tys` is (cosmetic, see types.ts). */
-  private numberType(...tys: ZType[]): ZType {
-    return tys.some((t) => {
-      const w = this.unifier.walk(t);
-      return w.k === 'int' && w.real;
-    })
-      ? REAL
-      : INT;
-  }
-
   /** If `ty` is (or can become) a set type, return its element type. */
   private asSet(ty: ZType): ZType | null {
     const w = this.unifier.walk(ty);
@@ -294,11 +283,11 @@ export class TypeChecker {
         return b.type;
       }
       case 'num':
-        return Number.isInteger(t.value) ? INT : REAL;
+        return INT;
       case 'bool':
         return BOOL;
       case 'builtinSet':
-        return power(t.set === 'ℝ' ? REAL : INT);
+        return power(INT);
       case 'emptyset':
         return power(this.unifier.fresh());
       case 'setDisplay': {
@@ -382,7 +371,7 @@ export class TypeChecker {
     const ty = this.value(t.arg, scope);
     if (t.op === 'neg') {
       if (!this.unify(ty, INT)) this.error(t, `‘-’ needs a number, but ${qt(t.arg)} is ${this.show(ty)}.`);
-      return this.numberType(ty);
+      return INT;
     }
     if (this.isErr(ty)) return t.op === '#' ? INT : ERROR;
     switch (t.op) {
@@ -432,10 +421,7 @@ export class TypeChecker {
         for (const [side, ty] of [[l, lt], [r, rt]] as [Term, ZType][]) {
           if (!this.unify(ty, INT)) this.error(side, `${qs(op)} needs numbers, but ${qt(side)} is ${this.show(ty)}.`);
         }
-        // `div`, `mod` and `a .. b` are about whole numbers; + - * keep ℝ for messages
-        if (op === '..') return power(INT);
-        if (op === 'div' || op === 'mod') return INT;
-        return this.numberType(lt, rt);
+        return op === '..' ? power(INT) : INT;
       case '∪':
       case '∩':
       case '∖':

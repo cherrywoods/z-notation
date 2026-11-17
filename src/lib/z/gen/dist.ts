@@ -7,7 +7,7 @@
 // that "0" never hides an undefined sub-term that `evalPred` would run into.
 
 import type { Term, VarDecl } from '../ast';
-import { EvalError, enumerateSet, equalValues, evalPred, evalTerm, memberOf, type Universe } from '../eval';
+import { EvalError, bindingValues, equalValues, evalPred, evalPredChecked, evalTerm, memberOf, type Universe } from '../eval';
 import { freeVars } from '../print';
 import { isSetLike, valueKey, type Value } from '../values';
 
@@ -49,12 +49,12 @@ export function hasBinder(t: Term): boolean {
 
 /**
  * Truth of a predicate as the evaluator defines it, with the reason when it is not
- * true. Uses the (pruning) distance first, so true quantified predicates are cheap.
+ * true, and `bounded` when the verdict relied on cutting off an infinite set.
  */
-export function truth(t: Term, env: Env, u: Universe): { result: boolean | 'undefined'; message?: string } {
-  if (dist(t, env, u) === 0) return { result: true };
+export function truth(t: Term, env: Env, u: Universe): { result: boolean | 'undefined'; message?: string; bounded?: true } {
   try {
-    return { result: evalPred(t, env, u) };
+    const r = evalPredChecked(t, env, u);
+    return r.bounded ? { result: r.value, bounded: true } : { result: r.value };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return { result: e instanceof EvalError && e.reason === 'undefined' ? 'undefined' : false, message };
@@ -144,11 +144,9 @@ function rel(t: Extract<Term, { kind: 'rel' }>, env: Env, u: Universe): number {
       const b = r.v;
       const ok = t.op === '<' ? a < b : t.op === '≤' ? a <= b : t.op === '>' ? a > b : a >= b;
       if (ok) return 0;
-      // how far off: for a strict comparison also the smallest step past equality
-      // (1 for whole numbers, less when decimals are involved)
+      // how far off (a strict comparison needs one more step past equality)
       const strict = t.op === '<' || t.op === '>';
-      const step = Number.isInteger(a) && Number.isInteger(b) ? 1 : 0.25;
-      return numDist(Math.abs(a - b) + (strict ? step : 0));
+      return numDist(Math.abs(a - b) + (strict ? 1 : 0));
     }
   }
 }
@@ -207,7 +205,9 @@ function forall(t: Quant, env: Env, u: Universe): number {
   const saved = names.map((n) => (env.has(n.name) ? env.get(n.name) : undefined));
   let fails = 0;
 
-  const go = (i: number, g: number): void => {
+  // `probe`: a value beyond the ℕ / ℤ window is bound; errors there are ignored,
+  // exactly as in the evaluator
+  const go = (i: number, g: number, probe: boolean): void => {
     // evaluate the guards that are fully bound, in order; a false guard makes the
     // whole subtree vacuously true (exactly as the short-circuiting evaluator would)
     while (g < guards.length && guards[g].need < i) {
@@ -221,24 +221,24 @@ function forall(t: Quant, env: Env, u: Universe): number {
       try {
         ok = (t.pred ? !evalPred(t.pred, env, u) : false) || evalPred(t.body, env, u);
       } catch {
-        ok = false;
+        ok = probe;
       }
       if (!ok) fails++;
       return;
     }
     const s = evalTerm(names[i].type, env, u);
     if (!isSetLike(s)) throw new Error('not a set');
-    const elems = enumerateSet(s, u);
-    if (!elems) throw new Error('too large');
-    for (const v of elems) {
-      env.set(names[i].name, v);
-      go(i + 1, g);
+    const list = bindingValues(s, env, u);
+    if (!list) throw new Error('too large');
+    for (let k = 0; k < list.values.length; k++) {
+      env.set(names[i].name, list.values[k]);
+      go(i + 1, g, probe || list.probe[k]);
       if (fails >= MAX_FAIL) return;
     }
   };
 
   try {
-    go(0, 0);
+    go(0, 0, false);
   } catch {
     fails = Math.max(fails, 1);
   } finally {

@@ -7,7 +7,9 @@ import {
   enumerateSet,
   equalValues,
   evalPred,
+  evalPredChecked,
   evalTerm,
+  isInfiniteSet,
   makeUniverse,
   memberOfDeclared,
   type Env,
@@ -19,7 +21,6 @@ import {
   EMPTY,
   atom,
   compareValues,
-  formatNumber,
   int,
   lazy,
   mkSet,
@@ -28,6 +29,7 @@ import {
   tuple,
   valueEquals,
   valueKey,
+  type SetLike,
   type Value,
 } from './values';
 
@@ -186,10 +188,8 @@ describe('sets, relations and functions', () => {
     expect(() => v('1 div 0')).toThrow('‘1 div 0’ is undefined: division by zero');
   });
 
-  it('checks integers exactly but enumerates them within bounds', () => {
+  it('checks integers exactly', () => {
     expect(evalPred(T('5000 ∈ ℕ₁ ∧ 0 ∉ ℕ₁ ∧ -1 ∉ ℕ ∧ -1 ∈ ℤ'), state, u)).toBe(true);
-    expect(evalPred(T('∀ n : ℕ • n ≤ 6'), state, u)).toBe(true); // bounded by intMax
-    expect(printValue(evalTerm(T('{ n : ℤ | n * n = 4 }'), state, u))).toBe('{-2, 2}');
   });
 
   it('bank invariant with negative balances', () => {
@@ -200,6 +200,70 @@ describe('sets, relations and functions', () => {
     ]);
     expect(evalPred(T('∀ a : dom balance • balance(a) ≥ -overdraft(a)'), env, u)).toBe(true);
     expect(evalPred(T('∀ a : dom balance • balance a ≥ 0'), env, u)).toBe(false);
+  });
+});
+
+describe('infinite sets: exact or bounded verdicts', () => {
+  const check = (src: string, env: Env = new Map(), uu: Universe = u) => {
+    const r = evalPredChecked(T(src), env, uu);
+    return r.bounded ? `≈ ${r.value}` : String(r.value);
+  };
+
+  it('quantifiers over ℕ / ℤ: a probe beyond the window decides exactly, otherwise ≈', () => {
+    // u's window is -3 .. 6
+    expect(check('∀ n : ℕ • n ≤ 6')).toBe('false'); // 7 is a counterexample
+    expect(check('∀ n : ℕ • n < 500')).toBe('false'); // so is 1000
+    expect(check('∃ n : ℕ • n > 500')).toBe('true');
+    expect(check('∃ n : ℤ • n < -500')).toBe('true');
+    expect(check('∀ n : ℕ • n ≥ 0')).toBe('≈ true');
+    expect(check('∃ n : ℕ • n * n = 2')).toBe('≈ false');
+    expect(check('∀ n : 1 .. 3 • n ≥ 1')).toBe('true'); // finite: exact
+    expect(check('∀ n : ℕ • n ∈ s', new Map([['s', mkSet([0, 1, 2, 3, 4, 5, 6].map(int))]]))).toBe('false');
+  });
+
+  it('does not count probe errors as counterexamples', () => {
+    const f = mkSet([0, 1, 2, 3, 4, 5, 6].map((n) => pair(int(n), int(n * n))));
+    expect(check('∀ n : ℕ • f(n) ≥ 0', new Map([['f', f]]))).toBe('≈ true');
+    expect(() => evalPred(T('∀ n : ℤ • f(n) ≥ 0'), new Map([['f', f]]), u)).toThrow('f(-3) is undefined'); // inside the window
+  });
+
+  it('comprehensions over ℕ / ℤ are never equal to a finite set by accident', () => {
+    const upTo = (n: number) => mkSet(Array.from({ length: n }, (_, i) => int(i + 1)));
+    expect(check('s = { n : ℕ | n > 0 }', new Map([['s', upTo(6)]]))).toBe('false'); // 7 is missing
+    expect(check('s = { n : ℕ | n > 0 }', new Map([['s', upTo(30)]]))).toBe('false'); // 50 is missing
+    expect(check('s = { n : ℕ | n > 0 ∧ n < 4 }', new Map([['s', upTo(3)]]))).toBe('≈ true');
+    expect(check('s = { n : ℕ | n > 0 ∧ n < 4 }', new Map([['s', upTo(2)]]))).toBe('false'); // 3 is missing
+    expect(printValue(evalTerm(T('{ n : ℤ | n * n = 4 }'), new Map(), u))).toBe('{-2, 2, …}');
+    expect(check('{ n : ℤ | n * n = 4 } = {-2, 2}')).toBe('≈ true');
+    expect(check('2 ∈ { n : ℤ | n * n = 4 } ∧ 3 ∉ { n : ℤ | n * n = 4 } ∧ 1000 ∈ { n : ℕ | n > 6 }')).toBe('true');
+    expect(check('{ n : ℕ | n > 0 } ⊆ ℕ₁')).toBe('≈ true');
+    expect(check('ℕ₁ ⊆ { n : ℕ | n < 30 }')).toBe('false');
+    expect(check('#{ n : ℕ | n < 5 } = 5')).toBe('≈ true');
+    // a finite set never equals an infinite one
+    expect(check('s = ℕ ∨ ℕ ⊆ s', new Map([['s', upTo(30)]]))).toBe('false');
+  });
+
+  const dates = makeUniverse({ DATE: ['a', 'b', 'c'], NAME: ['x', 'y'] }, { intMin: -3, intMax: 6, infinite: ['DATE'] });
+  const D = (n: string) => dates.carriers.DATE.find((d) => d.k === 'atom' && d.name === n)!;
+  const f = mkSet([pair(D('a'), int(1)), pair(D('b'), int(5))]);
+  const env: Env = new Map<string, Value>([['f', f]]);
+
+  it('infinite given sets: exact by using one generic element', () => {
+    expect(check('∀ d : DATE • d ∈ dom f', env, dates)).toBe('false');
+    expect(check('∃ d : DATE • d ∉ dom f', env, dates)).toBe('true');
+    expect(check('∀ d : DATE | d ∈ dom f • f(d) > 0', env, dates)).toBe('true');
+    expect(check('∀ d, e : DATE • d ≠ e ⇒ ¬ (d ∈ dom f ∧ e ∈ dom f ∧ f(d) = f(e))', env, dates)).toBe('true');
+    expect(check('dom f ⊆ DATE ∧ DATE ≠ dom f ∧ ¬ DATE ⊆ dom f', env, dates)).toBe('true');
+    expect(printValue(evalTerm(T('{ d : DATE | d ∈ dom f ∧ f(d) > 2 }'), env, dates))).toBe('{b}'); // exact and finite
+    expect(check('{ d : DATE | d ∉ dom f } = {c}', new Map([...env, ['c', D('c')]]), dates)).toBe('false'); // infinite
+    expect(check('#DATE = 3', env, dates)).toBe('≈ true'); // only the example elements are counted
+    // a function on all example dates is still not total on DATE
+    const g = mkSet(['a', 'b', 'c'].map((n) => pair(D(n), int(1))));
+    expect(() => evalPred(T('∀ d : DATE • g(d) > 0'), new Map([['g', g]]), dates)).toThrow('g(another DATE) is undefined: another DATE ∉ dom g');
+    expect(memberOfDeclared(f, T('DATE ⇸ ℕ'), new Map(), dates)).toBe(true);
+    expect(memberOfDeclared(f, T('DATE → ℕ'), new Map(), dates)).toBe(false); // never total on an infinite set
+    expect(isInfiniteSet(evalTerm(T('NAME ⇸ DATE'), env, dates) as SetLike, dates)).toBe(true);
+    expect(enumerateDeclared(T('DATE'), new Map(), dates)?.map(printValue)).toEqual(['a', 'b', 'c']);
   });
 });
 
@@ -250,58 +314,6 @@ describe('declared sets', () => {
 
   it('refuses to quantify over huge sets', () => {
     expect(() => evalPred(T('∀ f : BOOK ⇸ MEMBER • f = f'), new Map(), u)).toThrow(EvalError);
-  });
-});
-
-describe('real numbers (ℝ)', () => {
-  const p = (s: string, env: Env = new Map()) => evalPred(T(s), env, u);
-  const ev = (s: string, env: Env = new Map()) => printValue(evalTerm(T(s), env, u));
-  const S = (n: string) => atom('SENSOR', n);
-  const reals = makeUniverse({ SENSOR: ['s1', 's2'] }, { intMin: -3, intMax: 6 });
-
-  it('checks membership: ℕ and ℤ hold whole numbers only', () => {
-    expect(p('2.5 ∈ ℝ ∧ 2.5 ∉ ℤ ∧ 2.5 ∉ ℕ ∧ 2.5 ∉ ℕ₁ ∧ -0.5 ∈ ℝ ∧ 3 ∈ ℝ')).toBe(true);
-    expect(p('2.5 ∉ 1 .. 3 ∧ 2 ∈ 1 .. 3')).toBe(true);
-    expect(p('ℕ ⊆ ℝ ∧ ℤ ⊆ ℝ ∧ ¬ ℝ ⊆ ℤ ∧ ℝ = ℝ ∧ ℝ ≠ ℤ')).toBe(true);
-    expect(memberOfDeclared(fn([S('s1'), int(36.5)]), T('SENSOR ⇸ ℝ'), new Map(), reals)).toBe(true);
-    expect(memberOfDeclared(fn([S('s1'), int(36.5)]), T('SENSOR ⇸ ℤ'), new Map(), reals)).toBe(false);
-    expect(memberOfDeclared(int(0.25), T('ℝ'), new Map(), reals)).toBe(true);
-  });
-
-  it('computes with decimals without binary rounding noise', () => {
-    expect(ev('0.1 + 0.2')).toBe('0.3');
-    expect(p('0.1 + 0.2 = 0.3 ∧ 0.3 ∈ {0.1 + 0.2}')).toBe(true);
-    expect(p('1.1 * 3 = 3.3 ∧ 0.25 < 0.5 ∧ -1.5 ≤ -1.5')).toBe(true);
-    expect(ev('{ x : 1 .. 3 • x * 0.5 }')).toBe('{0.5, 1, 1.5}');
-    expect(ev('0.5 .. 3.5')).toBe('{1, 2, 3}'); // the whole numbers in between
-    expect(printValue(int(0.1 + 0.2))).toBe('0.3');
-    expect(valueEquals(int(0.1 + 0.2), int(0.3))).toBe(true);
-    expect(valueKey(int(0.1 + 0.2))).toBe(valueKey(int(0.3)));
-    expect(printValue(mkSet([int(36.5), int(-1.5), int(0.25)]))).toBe('{-1.5, 0.25, 36.5}');
-    expect(formatNumber(1e-7)).toBe('0.0000001');
-  });
-
-  it('refuses div and mod on decimals', () => {
-    expect(() => evalTerm(T('5 div 2.5'), new Map(), u)).toThrow('div works on whole numbers, but 2.5 is not one');
-    expect(() => evalTerm(T('t mod 2'), new Map([['t', int(36.5)]]), u)).toThrow('mod works on whole numbers, but ‘t’ is 36.5');
-  });
-
-  it('cannot list ℝ', () => {
-    let err: unknown;
-    try {
-      p('∀ x : ℝ • x = x');
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(EvalError);
-    expect((err as EvalError).reason).toBe('too-large');
-    expect((err as EvalError).message).toBe('Cannot try every value of ‘ℝ’: real numbers (ℝ) cannot be listed one by one');
-    expect(() => evalPred(T('∃ f : SENSOR ⇸ ℝ • f = ∅'), new Map(), reals)).toThrow('Cannot try every value of ‘SENSOR ⇸ ℝ’');
-    expect(() => evalTerm(T('#ℝ'), new Map(), u)).toThrow('‘ℝ’ cannot be listed — there are infinitely many real numbers');
-    expect(enumerateDeclared(T('ℝ'), new Map(), u)).toBeNull();
-    expect(enumerateSet(lazy({ kind: 'real' }), u)).toBeNull();
-    // membership in ℝ needs no listing
-    expect(p('∀ x : 1 .. 3 • x ∈ ℝ')).toBe(true);
   });
 });
 

@@ -5,27 +5,64 @@
 //   store.current            // SpecDoc (deeply reactive; direct mutation is autosaved too)
 //   store.updateSchema('state', { preds: '…' });
 
+import { untrack } from 'svelte';
 import type { SchemaDoc, SpecDoc } from './model';
 import { CUSTOM_ID, createSpec, slug } from './topics';
+import { renameStateRefs, schemaNameError } from './helpers';
 
-const KEY = (topicId: string) => `ztut:v1:${topicId}`;
+// v2: systems start bare (names only). Saves from the pre-filled v1 are dropped.
+const KEY = (topicId: string) => `ztut:v2:${topicId}`;
+
+try {
+  for (const k of Object.keys(localStorage)) if (k.startsWith('ztut:v1:')) localStorage.removeItem(k);
+} catch {
+  /* storage unavailable */
+}
 const SAVE_DELAY = 400;
 
+const isSchema = (s: unknown): s is SchemaDoc =>
+  !!s &&
+  typeof s === 'object' &&
+  typeof (s as SchemaDoc).id === 'string' &&
+  typeof (s as SchemaDoc).name === 'string' &&
+  typeof (s as SchemaDoc).decls === 'string' &&
+  typeof (s as SchemaDoc).preds === 'string';
+
+function wellFormed(doc: unknown, topicId: string): doc is SpecDoc {
+  const d = doc as SpecDoc;
+  return (
+    !!d &&
+    typeof d === 'object' &&
+    d.topicId === topicId &&
+    typeof d.title === 'string' &&
+    typeof d.given === 'string' &&
+    !!d.pools &&
+    typeof d.pools === 'object' &&
+    isSchema(d.state) &&
+    d.state.role === 'state' &&
+    (d.init === null || (isSchema(d.init) && d.init.role === 'init')) &&
+    Array.isArray(d.operations) &&
+    d.operations.every(isSchema)
+  );
+}
+
 function load(topicId: string): SpecDoc | null {
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(KEY(topicId));
+    raw = localStorage.getItem(KEY(topicId));
     if (!raw) return null;
-    const doc = JSON.parse(raw) as SpecDoc;
-    const ok =
-      doc &&
-      doc.topicId === topicId &&
-      typeof doc.given === 'string' &&
-      doc.state?.role === 'state' &&
-      Array.isArray(doc.operations);
-    return ok ? doc : null;
+    const doc: unknown = JSON.parse(raw);
+    if (wellFormed(doc, topicId)) return doc;
   } catch {
-    return null;
+    /* unparsable: back it up below */
   }
+  // keep the unreadable save; the next save would overwrite it
+  try {
+    if (raw) localStorage.setItem(`${KEY(topicId)}:broken`, raw);
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 function save(doc: SpecDoc) {
@@ -53,9 +90,22 @@ class SpecStore {
   /** JSON of the doc as opened; unchanged docs are not written (templates stay fresh). */
   #baseline = '';
   #dirty = false;
+  /** Last valid name of the state schema (renames update the references to it). */
+  #stateName = '';
 
   constructor() {
     $effect.root(() => {
+      // Renaming the state schema (Ward → Hospital) updates ΔWard / ΞWard, the Init
+      // import and InitWard. Invalid intermediate names (empty, "Hos pital") wait.
+      $effect(() => {
+        const doc = this.current;
+        if (!doc) return;
+        const name = doc.state.name.trim();
+        if (name === this.#stateName || schemaNameError(doc, 'state', name)) return;
+        const from = this.#stateName;
+        this.#stateName = name;
+        untrack(() => renameStateRefs(doc, from, name));
+      });
       $effect(() => {
         const doc = this.current;
         if (!doc) return;
@@ -103,6 +153,7 @@ class SpecStore {
   #open(doc: SpecDoc, dirty: boolean) {
     this.#baseline = JSON.stringify(doc);
     this.#dirty = dirty;
+    this.#stateName = doc.state.name.trim();
     this.current = doc;
   }
 

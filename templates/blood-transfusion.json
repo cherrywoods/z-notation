@@ -4,6 +4,13 @@
   "short": "Blood Transfusion",
   "icon": "droplet",
   "description": "A hospital blood bank issues blood units to patients.",
+  "card": [
+    "The blood bank stores units of donated blood, each of a known blood type.",
+    "Units are issued to patients who need a transfusion.",
+    "A unit may only go to a patient whose blood type it suits.",
+    "Each unit can be issued only once."
+  ],
+  "typesPrompt": "The blood bank deals with blood units, patients and blood types.",
   "requirements": [
     { "id": "R1", "text": "Every unit in the blood bank is registered with its blood type." },
     { "id": "R2", "text": "Blood is only issued to patients whose blood type has been determined." },
@@ -18,12 +25,73 @@
     { "name": "PATIENT", "values": ["Ida", "Jan", "Kim", "Lou", "Max", "Nia", "Ole", "Pia"], "infinite": true },
     { "name": "BLOODTYPE", "values": ["Oneg", "Opos", "Apos", "Bpos"] }
   ],
+  "typeOptions": [
+    { "name": "DONOR", "values": ["Ada", "Ben", "Cleo", "Dev", "Eva", "Finn"], "infinite": true },
+    { "name": "WARD", "values": ["ICU", "ER", "Surgery", "Maternity", "Oncology", "Cardiology"] },
+    {
+      "name": "DATE",
+      "values": ["2.Feb", "17.Apr", "8.Jun", "23.Jul", "5.Sep", "11.Nov", "29.Jan", "14.Mar"],
+      "infinite": true
+    }
+  ],
   "fixedValues": {
     "compatible": "{Oneg ↦ Oneg, Oneg ↦ Opos, Oneg ↦ Apos, Oneg ↦ Bpos, Opos ↦ Opos, Opos ↦ Apos, Opos ↦ Bpos, Apos ↦ Apos, Bpos ↦ Bpos}"
   },
+  "goals": {
+    "types": [
+      { "text": "A type for blood units", "check": { "given": "UNIT" } },
+      { "text": "A type for patients", "check": { "given": "PATIENT" } },
+      { "text": "A type for blood types", "check": { "given": "BLOODTYPE" } }
+    ],
+    "state": [
+      { "text": "The blood type of each unit", "check": { "var": "unitType" } },
+      { "text": "The blood type of each patient", "check": { "var": "patientType" } },
+      { "text": "Which blood types are compatible", "check": { "var": "compatible" } },
+      { "text": "Which unit was issued to which patient", "check": { "var": "issued" } },
+      {
+        "text": "Patients only get compatible blood",
+        "check": { "holds": "∀ u : dom issued • (unitType(u) ↦ patientType(issued(u))) ∈ compatible" }
+      }
+    ],
+    "init": [
+      { "text": "No units at the start", "check": { "holds": "unitType = ∅" } },
+      { "text": "Nothing issued at the start", "check": { "holds": "issued = ∅" } }
+    ],
+    "ops": {
+      "CompatibleUnits": [
+        { "text": "Take a patient as input and output units", "check": { "var": ["p?", "units!"] } },
+        { "text": "Only for patients whose blood type is known", "check": { "holds": "p? ∈ dom patientType" } },
+        {
+          "text": "Output the units in stock that suit the patient",
+          "check": { "holds": "units! = { u ∈ dom unitType | u ∉ dom issued ∧ (unitType(u) ↦ patientType(p?)) ∈ compatible }" }
+        },
+        {
+          "text": "Don't change anything",
+          "check": { "holds": "unitType′ = unitType ∧ patientType′ = patientType ∧ compatible′ = compatible ∧ issued′ = issued" }
+        }
+      ],
+      "IssueUnit": [
+        { "text": "Take a unit and a patient as inputs", "check": { "var": ["u?", "p?"] } },
+        {
+          "text": "Only units that are registered and not yet issued",
+          "check": { "holds": "u? ∈ dom unitType ∧ u? ∉ dom issued" }
+        },
+        {
+          "text": "Only if the blood suits the patient's blood type",
+          "check": { "holds": "p? ∈ dom patientType ∧ (unitType(u?) ↦ patientType(p?)) ∈ compatible" }
+        },
+        { "text": "Record that the unit went to the patient", "check": { "holds": "issued′ = issued ∪ {u? ↦ p?}" } },
+        {
+          "text": "Leave blood types and the table unchanged",
+          "check": { "holds": "unitType′ = unitType ∧ patientType′ = patientType ∧ compatible′ = compatible" }
+        }
+      ]
+    }
+  },
   "state": {
+    "invariantPrompt": "A patient may only be issued blood that is compatible with their blood type.",
     "name": "BloodBank",
-    "prompt": "Every issued unit must be compatible with its patient's blood type.",
+    "prompt": "Units and patients with their blood types, and issued units. Patients only get compatible blood.",
     "declarations": [
       { "text": "unitType : UNIT ⇸ BLOODTYPE", "requirements": ["R1"] },
       { "text": "patientType : PATIENT ⇸ BLOODTYPE", "requirements": ["R2"] },
@@ -42,7 +110,7 @@
   },
   "init": {
     "name": "InitBloodBank",
-    "prompt": "At the start, the blood bank holds no units.",
+    "prompt": "At the start, the blood bank has no units.",
     "declarations": [
       { "text": "BloodBank", "requirements": [] }
     ],
@@ -54,7 +122,7 @@
     {
       "name": "CompatibleUnits",
       "kind": "query",
-      "prompt": "Output the units in stock that are compatible with the patient.",
+      "prompt": "Show the units in stock that a given patient can safely receive.",
       "declarations": [
         { "text": "ΞBloodBank", "requirements": [] },
         { "text": "p? : PATIENT", "requirements": ["R6"] },
@@ -72,7 +140,7 @@
     {
       "name": "IssueUnit",
       "kind": "update",
-      "prompt": "A unit may be issued only once, and only to a compatible patient.",
+      "prompt": "Issue a unit to a patient, but only once and only if it's compatible.",
       "declarations": [
         { "text": "ΔBloodBank", "requirements": [] },
         { "text": "u? : UNIT", "requirements": ["R7"] },

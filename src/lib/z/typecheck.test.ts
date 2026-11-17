@@ -5,6 +5,8 @@ import { analyseSpec, type Analysis } from './index';
 import { parseTerm } from './parser';
 import { printTerm } from './print';
 import { TypeChecker, type Scope } from './typecheck';
+import { exampleOperation } from './generate';
+import { infer } from './infer';
 import { describeType, given, power, relation, typeToString, INT } from './types';
 
 const LIB_WITH_LOANS: SpecDoc = { ...LIBRARY, operations: [...LIBRARY.operations, LOANS_OF] };
@@ -218,7 +220,7 @@ describe('scope diagnostics', () => {
   });
 
   it('rejects redeclaring state variables in operations', () => {
-    expect(messages(analyseSpec(lib({ lend: { decls: 'ΔLibrary\nonLoan′ : ℙ BOOK\nborrower : BOOK ⇸ MEMBER\nbook?, member? : BOOK' } })))).toEqual([
+    expect(messages(analyseSpec(lib({ lend: { decls: 'ΔLibrary\nonLoan′ : ℙ BOOK\nborrower : BOOK ⇸ MEMBER\nbook? : BOOK\nmember? : BOOK' } })))).toEqual([
       '‘onLoan′’ is already part of ‘ΔLibrary’ — no need to declare it.',
       '‘borrower’ is already a state variable (from ‘ΔLibrary’).',
       '‘∪’ needs two sets of the same type, but ‘borrower’ is a relation BOOK ↔ MEMBER and ‘{book? ↦ member?}’ is a relation BOOK ↔ BOOK.',
@@ -233,7 +235,7 @@ describe('scope diagnostics', () => {
       '‘onLoan’ is a variable, not a type. Declare ‘book? : BOOK’ and add ‘book? ∈ onLoan’ below the line.',
     ]);
     expect(messages(analyseSpec(lib({ state: { decls: 'onLoan : ℙ BOOK\nborrower : onLoan ⇸ MEMBER' } })))).toEqual([
-      '‘onLoan’ is a variable — above the line use types only (given sets, ℕ, ℤ, ℝ, ℙ, ⇸ …) and state conditions below the line.',
+      '‘onLoan’ is a variable — above the line use types only (given sets, ℕ, ℤ, ℙ, ⇸ …) and state conditions below the line.',
     ]);
   });
 
@@ -242,7 +244,7 @@ describe('scope diagnostics', () => {
     expect(messages(analyseSpec(lib({ lend: { preds: 'Library' } })))).toEqual([
       '‘Library’ is a schema, not a variable (combining schemas is not part of this tutorial).',
     ]);
-    expect(messages(analyseSpec(lib({ find: { decls: 'ΞLibrary\nbook?, book? : BOOK\nmember! : MEMBER' } })))).toEqual([
+    expect(messages(analyseSpec(lib({ find: { decls: 'ΞLibrary\nbook? : BOOK\nbook? : BOOK\nmember! : MEMBER' } })))).toEqual([
       '‘book?’ is declared twice.',
     ]);
   });
@@ -382,30 +384,87 @@ describe('realistic specifications', () => {
   });
 });
 
-describe('real numbers (ℝ)', () => {
-  const ward = (statePreds: string, ops: [string, string, string][] = []) =>
-    analyseSpec(spec('[SENSOR]', ['Ward', 'temperature : SENSOR ⇸ ℝ\nlimit : ℕ\nreadings : ℙ ℝ', statePreds], ops));
+describe('importing the state as ‘S’ and ‘S′’', () => {
+  const lend = (decls: string): SpecDoc => {
+    const s = structuredClone(LIBRARY);
+    s.operations[1].decls = decls;
+    return s;
+  };
+  const delta = lend('ΔLibrary\nbook? : BOOK\nmember? : MEMBER');
 
-  it('type-checks ℝ, decimals and mixed arithmetic', () => {
-    const a = ward('∀ s : dom temperature • temperature(s) ≥ -10.5\nlimit + 0.5 ∈ ran temperature ∨ readings = ∅\nreadings ⊆ ℝ ∧ ℕ ⊆ ℝ', [
-      ['Record', 'ΔWard\ns? : SENSOR\nt? : ℝ', 's? ∉ dom temperature\nt? > 36.5\ntemperature′ = temperature ∪ {s? ↦ t?}\nlimit′ = limit\nreadings′ = readings ∪ {t?}'],
-    ]);
-    expect(fmt(a)).toEqual([]);
-    expect(a.byId.state.vars.map((v) => typeToString(v.type, { relations: true }))).toEqual(['SENSOR ↔ ℝ', 'ℤ', 'ℙ ℝ']);
-    expect(a.byId['op-0'].vars.find((v) => v.name === 't?')).toMatchObject({ role: 'input', type: { k: 'int' } });
+  it('is exactly ΔS: same analysis, examples and inference', () => {
+    for (const decls of ['Library\nLibrary′\nbook? : BOOK\nmember? : MEMBER', 'book? : BOOK\nLibrary′\nmember? : MEMBER\nLibrary']) {
+      const two = lend(decls);
+      const a = analyseSpec(two);
+      const b = analyseSpec(delta);
+      expect(fmt(a)).toEqual([]);
+      const op = a.byId['op-lend'];
+      const ref = b.byId['op-lend'];
+      expect(op.imports).toBe('Δ');
+      expect(op.ok).toBe(true);
+      expect(op.vars.map((v) => `${v.name}:${v.role}:${typeToString(v.type)}`)).toEqual(ref.vars.map((v) => `${v.name}:${v.role}:${typeToString(v.type)}`));
+      expect(op.preds.map((p) => `${p.origin}: ${printTerm(p.term)}`)).toEqual(ref.preds.map((p) => `${p.origin}: ${printTerm(p.term)}`));
+      for (const seed of [1, 2, 3]) {
+        expect(exampleOperation(two, a, 'op-lend', seed, 'applicable')).toEqual(exampleOperation(delta, b, 'op-lend', seed, 'applicable'));
+      }
+      expect(JSON.stringify(infer(two, a))).toBe(JSON.stringify(infer(delta, b)));
+    }
   });
 
-  it('describes ℝ in messages', () => {
-    expect(messages(ward('temperature = limit'))).toEqual([
-      'Both sides of ‘=’ must have the same type, but ‘temperature’ is a relation SENSOR ↔ ℝ and ‘limit’ is a number.',
+  it('explains a lone or doubled import', () => {
+    expect(messages(analyseSpec(lend('Library′\nbook? : BOOK\nmember? : MEMBER')))).toEqual(['Write ‘ΔLibrary’ to import the state before and after.']);
+    expect(messages(analyseSpec(lend('Library\nbook? : BOOK\nmember? : MEMBER')))).toEqual([
+      'In an operation, import the state with ‘ΔLibrary’ (it may change) or ‘ΞLibrary’ (it stays the same).',
     ]);
-    expect(messages(ward('readings = 2.5'))).toEqual([
-      'Both sides of ‘=’ must have the same type, but ‘readings’ is a set of numbers and ‘2.5’ is a number. Did you mean ‘{2.5}’?',
+    expect(messages(analyseSpec(lend('ΔLibrary\nLibrary\nLibrary′\nbook? : BOOK\nmember? : MEMBER')))).toEqual([
+      '‘Library’ and ‘Library′’ together already mean ‘ΔLibrary’ — remove one of the imports.',
     ]);
-    expect(messages(ward('dom readings = ∅'))).toEqual(['dom needs a relation (a set of pairs), but ‘readings’ is a set of numbers.']);
-    expect(messages(ward('', [['Read', 'ΞWard\nt? : readings', 't? > 0']]))).toEqual([
-      '‘readings’ is a variable, not a type. Declare ‘t? : ℝ’ and add ‘t? ∈ readings’ below the line.',
+    expect(messages(analyseSpec(lend('Library\nLibrary′\nLibrary′\nbook? : BOOK\nmember? : MEMBER')))).toEqual(['The state is already imported.']);
+  });
+});
+
+describe('names from outside the tutorial', () => {
+  const lendPreds = (preds: string) => {
+    const s = structuredClone(LIBRARY);
+    s.operations[1].preds = preds;
+    return messages(analyseSpec(s));
+  };
+
+  it('explains seq, min, max, succ and ASCII number sets', () => {
+    expect(lendPreds('#onLoan < max onLoan')).toEqual(['‘max’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x : S • x ≤ m).']);
+    expect(lendPreds('#onLoan = min(onLoan)')).toEqual(['‘min’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x : S • m ≤ x).']);
+    expect(lendPreds('#onLoan′ = succ(#onLoan)')).toEqual(['‘succ’ is not part of this tutorial — write ‘n + 1’.']);
+    expect(lendPreds('#onLoan ∈ N')).toEqual(['Unknown name ‘N’ — did you mean ℕ (type NN)?']);
+    expect(lendPreds('#onLoan ∈ ZZ')).toEqual(['Unknown name ‘ZZ’ — did you mean ℤ (type ZZ and a space)?']);
+    const s = structuredClone(LIBRARY);
+    s.state.decls += '\nqueue : seq MEMBER';
+    expect(messages(analyseSpec(s))).toEqual(['Sequences (‘seq’, ‘⟨ ⟩’) are not part of this tutorial.']);
+  });
+
+  it('a declared variable called max is fine', () => {
+    const s = structuredClone(LIBRARY);
+    s.state.decls += '\nmax : ℕ';
+    s.state.preds += '\n#onLoan ≤ max';
+    expect(messages(analyseSpec(s))).toEqual([]);
+  });
+});
+
+describe('given sets', () => {
+  it('warns about N, Z and R', () => {
+    const a = analyseSpec({ ...structuredClone(LIBRARY), given: '[BOOK, MEMBER, N, Z, R]' });
+    expect(fmt(a)).toEqual([
+      'types:given scope/warning 15-16: Did you mean ℕ (type NN)? ‘N’ is declared here as a new given set.',
+      'types:given scope/warning 18-19: Did you mean ℤ (type ZZ)? ‘Z’ is declared here as a new given set.',
+      'types:given scope/warning 21-22: Real numbers are not part of this tutorial — did you mean ℤ (type ZZ)? ‘R’ is declared here as a new given set.',
     ]);
+    expect(a.ok).toBe(true); // warnings only
+  });
+
+  it('defines every name it can read', () => {
+    const a = analyseSpec({ ...structuredClone(LIBRARY), given: '[BOOK MEMBER]' });
+    expect(a.givenSets).toEqual(['BOOK', 'MEMBER']);
+    expect(messages(a)).toEqual(['Separate the names with ‘,’']);
+    expect(analyseSpec({ ...structuredClone(LIBRARY), given: '[BOOK, MEMBER, ℕ]' }).givenSets).toEqual(['BOOK', 'MEMBER']);
   });
 });
 
@@ -423,13 +482,7 @@ describe('TypeChecker directly', () => {
     expect(ty('{ n : NAME; m : ℕ | f(n) = m }')).toBe('NAME ↔ ℤ');
     expect(ty('(1, ∅)')).toBe('ℤ × ℙ ?');
     expect(ty('dom f × ran f')).toBe('NAME ↔ ℤ');
-    expect(ty('ℝ')).toBe('ℙ ℝ');
-    expect(ty('NAME ⇸ ℝ')).toBe('ℙ (NAME ↔ ℝ)');
     expect(ty('2 + 3')).toBe('ℤ');
-    expect(ty('2 * 0.5')).toBe('ℝ');
-    expect(ty('-0.5')).toBe('ℝ');
-    expect(ty('7 div 2')).toBe('ℤ');
-    expect(ty('{1, 2.5}')).toBe('ℙ ℤ'); // one numeric type; the ℝ flag only affects display
     expect(tc.errorCount).toBe(0);
   });
   it('describes types in words', () => {

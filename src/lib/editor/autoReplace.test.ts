@@ -37,7 +37,6 @@ describe('auto-replace while typing', () => {
     expect(type('onLoan : PP BOOK ')).toBe('onLoan : ℙ BOOK ');
     expect(type('n : NN ')).toBe('n : ℕ ');
     expect(type('n : NN1 ')).toBe('n : ℕ₁ ');
-    expect(type('t : RR ')).toBe('t : ℝ ');
     expect(type('forall x : S @ P')).toBe('∀ x : S • P');
     expect(type('pin ')).toBe('pin ');
     expect(type('A union B')).toBe('A ∪ B');
@@ -57,6 +56,5 @@ describe('normalizeAscii (paste / blur)', () => {
     expect(normalizeAscii("borrower' = borrower \\/ {book? |-> member?}")).toBe('borrower′ = borrower ∨ {book? ↦ member?}');
     expect(normalizeAscii('onLoan : PP BOOK\nborrower : BOOK -|> MEMBER')).toBe('onLoan : ℙ BOOK\nborrower : BOOK ⇸ MEMBER');
     expect(normalizeAscii('x in dom f')).toBe('x ∈ dom f');
-    expect(normalizeAscii('t : SENSOR -|> RR')).toBe('t : SENSOR ⇸ ℝ');
   });
 });
