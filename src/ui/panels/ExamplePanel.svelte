@@ -10,9 +10,9 @@
 
   let { schemaId }: { schemaId: string } = $props();
 
-  const newSeed = () => Math.floor(Math.random() * 2 ** 31);
-  let seed = $state(newSeed());
-  let mode = $state<'applicable' | 'blocked'>('applicable');
+  // Seeds live in `live`, per step: regenerating here never changes another step's example.
+  const seed = $derived(live.seedFor(schemaId));
+  const mode = $derived(live.modes[schemaId] ?? 'applicable');
   let spin = $state(0);
 
   const isOp = $derived(schemaId.startsWith('op-'));
@@ -34,15 +34,27 @@
       if (schemaId === 'types') return generator.exampleTypes(spec, an, seed);
       if (schemaId === 'state') return generator.exampleState(spec, an, seed);
       if (schemaId === 'init') return generator.exampleInit(spec, an, seed);
-      return generator.exampleOperation(spec, an, schemaId, seed, mode);
+      // operations run on the State step's example state (its seed changes only there)
+      const st = generator.exampleState(spec, an, live.seedFor('state'));
+      const before = st.ok ? Object.fromEntries(st.vars.map((v) => [v.name, v.value])) : undefined;
+      return generator.exampleOperation(spec, an, schemaId, seed, mode, { before });
     } catch (e) {
       console.error('[example]', e);
       return null;
     }
   });
 
+  /** The step's schema, if the student has not written anything in it yet. */
+  const untouched = $derived.by(() => {
+    const spec = live.spec;
+    if (!spec || schemaId === 'types') return false;
+    const doc = schemaId === 'state' ? spec.state : schemaId === 'init' ? spec.init : spec.operations.find((o) => o.id === schemaId);
+    return !!doc && !doc.decls.trim() && !doc.preds.trim();
+  });
+
   /** Nothing declared yet: no example, no tools. */
   const empty = $derived.by(() => {
+    if (untouched) return true;
     const r = result;
     if (!r || r.kind === 'types') return false;
     if (r.kind === 'state') return r.ok && r.vars.length === 0;
@@ -50,7 +62,7 @@
   });
 
   function regenerate() {
-    seed = newSeed();
+    live.regenerate(schemaId);
     spin++;
   }
 
@@ -77,8 +89,7 @@
           aria-label="Show a case where the operation is blocked"
           title="Blocked case"
           onclick={() => {
-            mode = mode === 'blocked' ? 'applicable' : 'blocked';
-            seed = newSeed();
+            live.modes[schemaId] = mode === 'blocked' ? 'applicable' : 'blocked';
           }}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M6 6l12 12" /></svg>
@@ -145,6 +156,10 @@
         {#if v.status === 'free'}
           <button type="button" class="free" aria-label={`Not determined by the spec. Also possible: ${v.alternative ?? ''}`}
             >?<span class="tip">Not fixed by the spec — also possible:<br /><span class="z-text">{v.alternative}</span></span></button
+          >
+        {:else if v.status === 'chosen'}
+          <button type="button" class="free" aria-label="Chosen for this example. Other values may fit too."
+            >?<span class="tip">Chosen for this example. Other values may fit too.</span></button
           >
         {/if}
       </span>

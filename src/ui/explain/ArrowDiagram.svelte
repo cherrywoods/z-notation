@@ -8,12 +8,27 @@
   const uid = $props.id();
 
   // geometry (viewBox units ≈ px)
-  const W = 168;
-  const LX = 34; // centre of the left column
-  const RX = 134; // centre of the right column
   const TOP = 30; // y of the first row
   const ROW = 22;
+  const GAP = 58; // between the two sets (room for the arrows)
+  const PAD = 18; // set outline around its widest label
   const KINDS = ['normal', 'added', 'removed', 'bad'] as const;
+
+  /** Rough text width at 13px (to size the sets and to end arrows next to the labels). */
+  const textW = (s: string) =>
+    [...s].reduce(
+      (w, c) =>
+        w +
+        (/[.ijlI]/.test(c) ? 3.3 : /[MW]/.test(c) ? 11 : /[mw]/.test(c) ? 9 : /[A-Z]/.test(c) ? 8 : /\d/.test(c) ? 6.5 : 6),
+      0,
+    );
+
+  /** Column widths and centres of a panel. */
+  function geom(p: DiagramPanel) {
+    const lw = Math.max(36, ...p.left.map(textW)) + PAD;
+    const rw = Math.max(36, ...p.right.map(textW)) + PAD;
+    return { lw, rw, LX: lw / 2 + 1, RX: lw + GAP + rw / 2 + 1, W: lw + GAP + rw + 2 };
+  }
 
   const rows = (p: DiagramPanel) => Math.max(p.left.length, p.right.length, 1);
   const height = (p: DiagramPanel) => TOP + (rows(p) - 1) * ROW + 16;
@@ -32,15 +47,13 @@
     return out;
   }
   const y = (i: number) => TOP + i * ROW;
-  const isDate = (s: string) => /^\d/.test(s);
-  /** Rough text width at 13px (to start/end arrows just next to the labels). */
-  const textW = (s: string) =>
-    [...s].reduce((w, c) => w + (c === '.' ? 3.3 : c === 'M' ? 11 : /[A-Z]/.test(c) ? 8 : /\d/.test(c) ? 6.5 : 5.8), 0);
+  const isNumber = (s: string) => /^\d/.test(s);
 </script>
 
 <div class="diagram" class:two={spec.panels.length > 1}>
   {#each spec.panels as p, pi}
     {@const h = height(p)}
+    {@const { lw, rw, LX, RX, W } = geom(p)}
     <figure>
       <svg viewBox="0 0 {W} {h}" width={W} height={h} role="img" aria-label={p.caption?.replaceAll('`', '') ?? 'arrow diagram'}>
         <defs>
@@ -54,15 +67,15 @@
         <!-- sets -->
         {#if p.leftLabel}<text class="label" x={LX} y="11">{p.leftLabel}</text>{/if}
         {#if p.rightLabel}<text class="label" x={RX} y="11">{p.rightLabel}</text>{/if}
-        <rect class="set" x={LX - 31} y={TOP - 15} width="62" height={(rows(p) - 1) * ROW + 26} rx="14" />
-        <rect class="set" x={RX - 33} y={TOP - 15} width="66" height={(rows(p) - 1) * ROW + 26} rx="14" />
+        <rect class="set" x={LX - lw / 2} y={TOP - 15} width={lw} height={(rows(p) - 1) * ROW + 26} rx="14" />
+        <rect class="set" x={RX - rw / 2} y={TOP - 15} width={rw} height={(rows(p) - 1) * ROW + 26} rx="14" />
 
-        <!-- highlighted subsets (dom / ran / S) -->
+        <!-- highlighted subsets (dom / ran) -->
         {#each runs(p.left, p.highlightLeft) as [a, b]}
-          <rect class="hl" x={LX - 25} y={y(a) - 10} width="50" height={(b - a) * ROW + 20} rx="9" />
+          <rect class="hl" x={LX - lw / 2 + 5} y={y(a) - 10} width={lw - 10} height={(b - a) * ROW + 20} rx="9" />
         {/each}
         {#each runs(p.right, p.highlightRight) as [a, b]}
-          <rect class="hl" x={RX - 27} y={y(a) - 10} width="54" height={(b - a) * ROW + 20} rx="9" />
+          <rect class="hl" x={RX - rw / 2 + 5} y={y(a) - 10} width={rw - 10} height={(b - a) * ROW + 20} rx="9" />
         {/each}
 
         <!-- arrows -->
@@ -71,8 +84,8 @@
           {@const j = p.right.indexOf(ar.to)}
           {#if i >= 0 && j >= 0}
             {@const k = ar.kind ?? 'normal'}
-            {@const x1 = Math.min(LX + textW(ar.from) / 2 + 4, LX + 26)}
-            {@const x2 = Math.max(RX - textW(ar.to) / 2 - 5, RX - 29)}
+            {@const x1 = LX + textW(ar.from) / 2 + 4}
+            {@const x2 = RX - textW(ar.to) / 2 - 5}
             <line class="arrow {k}" x1={x1} y1={y(i)} x2={x2} y2={y(j)} marker-end="url(#{uid}-{pi}-{k})" />
             {#if k === 'removed'}
               {@const mx = (x1 + x2) / 2}
@@ -84,10 +97,10 @@
 
         <!-- elements -->
         {#each p.left as name, i}
-          <text class="el" class:date={isDate(name)} class:bad={p.badLeft?.includes(name)} x={LX} y={y(i)}>{name}</text>
+          <text class="el" class:number={isNumber(name)} class:bad={p.badLeft?.includes(name)} x={LX} y={y(i)}>{name}</text>
         {/each}
         {#each p.right as v, i}
-          <text class="el" class:date={isDate(v)} x={RX} y={y(i)}>{v}</text>
+          <text class="el" class:number={isNumber(v)} x={RX} y={y(i)}>{v}</text>
         {/each}
       </svg>
       {#if p.caption}
@@ -148,7 +161,7 @@
     text-anchor: middle;
     dominant-baseline: central;
   }
-  .el.date {
+  .el.number {
     font-style: normal;
   }
   .el.bad {

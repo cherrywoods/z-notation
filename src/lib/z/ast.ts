@@ -41,7 +41,7 @@ export type Term =
   | { kind: 'builtinSet'; set: 'ℕ' | 'ℕ₁' | 'ℤ'; span: Span }
   | { kind: 'emptyset'; span: Span }
   | { kind: 'setDisplay'; elems: Term[]; span: Span } // {a, b, c}
-  | { kind: 'setComp'; decls: VarDecl[]; pred?: Term; expr?: Term; span: Span } // { x : S | P • e }
+  | { kind: 'setComp'; decls: VarDecl[]; pred?: Term; expr?: Term; span: Span } // { x ∈ S | P . e }
   | { kind: 'tuple'; elems: Term[]; span: Span } // (a, b)
   | { kind: 'cross'; elems: Term[]; span: Span } // A × B × C
   | { kind: 'apply'; fn: Term; arg: Term; span: Span } // f(x)
@@ -62,7 +62,7 @@ export interface VarDecl {
   names: { name: string; base: string; decoration: Decoration; span: Span }[];
   type: Term;
   span: Span;
-  /** Separator as written (`x : S` or `x ∈ S`); only affects printing. Default ':'. */
+  /** Separator as written (`x : S` or `x ∈ S`). Printing uses ∈ in ∀ / ∃ / { … } and : in schemas. */
   sep?: ':' | '∈';
 }
 

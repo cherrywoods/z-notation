@@ -7,19 +7,22 @@
 // { n : ℕ | … }) only a window [intMin, intMax] plus a few "probe" numbers beyond it
 // can be tried. A verdict that depended on such a cut-off is *bounded*
 // (`evalPredChecked` reports it), unless a concrete witness decides it exactly:
-// ∀ n : ℕ • n < 50 is exactly false because the probe 100 is a counterexample.
+// ∀ n ∈ ℕ . n < 50 is exactly false because the probe 100 is a counterexample.
 // A comprehension over ℕ becomes an `approx` set that knows some of its elements and
 // can test membership, so a finite set never wrongly equals {n : ℕ | n > 0}.
 //
 // Given sets that are infinite in principle (`Universe.infinite`) are checked
 // exactly: example values only ever use the carrier's atoms, so all other elements
-// behave alike, and one generic atom ("another DATE") stands for all of them.
+// behave alike, and one generic atom ("another DATE") stands for all of them. (A total
+// function on such a set can only be shown on the example elements; where that
+// matters the verdict is bounded.)
 //
 // Logical connectives short-circuit (left to right), so `x ∈ dom f ⇒ f(x) = y` never
 // evaluates the undefined `f(x)`. Undefined applications throw an EvalError.
 
 import type { Span, Term, VarDecl } from './ast';
-import { printTerm } from './print';
+import { spend } from './gen/clock';
+import { freeVars, printTerm } from './print';
 import {
   EMPTY,
   atom,
@@ -52,6 +55,8 @@ export interface Universe {
   intMax: number;
   /** Maximum number of elements a set may have to be enumerated (default 5000). */
   enumLimit?: number;
+  /** Work limit of one quantifier / comprehension in term nodes (default 10000, see DEFAULT_WORK). */
+  workLimit?: number;
   /** Given sets that are infinite in principle: their carrier is only an example. */
   infinite?: readonly string[];
   /** Extra numbers to try beyond [intMin, intMax] (e.g. the constants of the spec). */
@@ -61,15 +66,46 @@ export interface Universe {
 export type Env = ReadonlyMap<string, Value>;
 
 export class EvalError extends Error {
+  /** Source span of the offending term (in its section). */
+  readonly span: Span;
+  /** 'undefined': partial function applied outside its domain; 'too-large': enumeration limit. */
+  readonly reason: 'undefined' | 'too-large' | 'error';
+  private text: string | (() => string);
+  private generalText: string | (() => string) | undefined;
+
+  /**
+   * `message` may be a function: it is only computed when read. `general`: the same
+   * without the values, in terms of the spec (`cleared(a₁) is undefined when a₁ ∉ dom cleared`).
+   */
   constructor(
-    message: string,
-    /** Source span of the offending term (in its section). */
-    readonly span: Span,
-    /** 'undefined': partial function applied outside its domain; 'too-large': enumeration limit. */
-    readonly reason: 'undefined' | 'too-large' | 'error' = 'error',
+    message: string | (() => string),
+    span: Span,
+    reason: 'undefined' | 'too-large' | 'error' = 'error',
+    general?: string | (() => string),
   ) {
-    super(message);
+    // The searches throw (and catch) these all the time, e.g. for f(x) with x ∉ dom f:
+    // no stack trace, which would cost far more than the evaluation itself.
+    const E = Error as { stackTraceLimit?: number };
+    const limit = E.stackTraceLimit;
+    E.stackTraceLimit = 0;
+    super();
+    E.stackTraceLimit = limit;
     this.name = 'EvalError';
+    this.span = span;
+    this.reason = reason;
+    this.text = message;
+    this.generalText = general;
+  }
+
+  override get message(): string {
+    if (typeof this.text === 'function') this.text = this.text();
+    return this.text;
+  }
+
+  /** The reason in terms of the spec, if there is one (see the constructor). */
+  get general(): string | undefined {
+    if (typeof this.generalText === 'function') this.generalText = this.generalText();
+    return this.generalText;
   }
 }
 
@@ -80,13 +116,21 @@ export interface Checked<T> {
 }
 
 const DEFAULT_LIMIT = 5000;
+/**
+ * Work limit of one quantifier or set comprehension (with everything nested in it), in
+ * evaluated term nodes (set operations count their elements too). Each variable may
+ * take up to `enumLimit` values, but not their product: `∀ a, b, c ∈ ℙ X` would have to
+ * try 16 million bindings for 8 values in X.
+ * When the limit is hit, the bindings not tried yet are cut off (a bounded verdict).
+ */
+const DEFAULT_WORK = 10000;
 /** Numbers beyond the window that are always tried when ℕ / ℤ are listed. */
 const PROBES = [50, 100, 1000, 1000000];
 
 /** Build a universe from value pools: {BOOK: ['Dune', 'Emma']} → atoms with pool order. */
 export function makeUniverse(
   pools: Record<string, readonly string[]>,
-  opts: { intMin?: number; intMax?: number; enumLimit?: number; infinite?: readonly string[]; probes?: readonly number[] } = {},
+  opts: { intMin?: number; intMax?: number; enumLimit?: number; workLimit?: number; infinite?: readonly string[]; probes?: readonly number[] } = {},
 ): Universe {
   const carriers: Record<string, Value[]> = {};
   for (const [set, names] of Object.entries(pools)) carriers[set] = names.map((n, i) => atom(set, n, i));
@@ -95,6 +139,7 @@ export function makeUniverse(
     intMin: opts.intMin ?? -10,
     intMax: opts.intMax ?? 10,
     enumLimit: opts.enumLimit,
+    workLimit: opts.workLimit,
     infinite: opts.infinite,
     probes: opts.probes,
   };
@@ -105,20 +150,23 @@ export function makeUniverse(
 interface Base {
   u: Universe;
   limit: number;
+  work: number;
   carrierSets: Map<string, SetLike>;
 }
 interface Ctx extends Base {
   /** Set when a result relied on cutting off an infinite set. */
   track: { bounded: boolean };
+  /** Work left (term nodes) for the outermost quantifier / comprehension being evaluated. */
+  budget: { left: number } | null;
 }
 const baseCache = new WeakMap<Universe, Base>();
 function ctxOf(u: Universe): Ctx {
   let b = baseCache.get(u);
   if (!b) {
-    b = { u, limit: u.enumLimit ?? DEFAULT_LIMIT, carrierSets: new Map() };
+    b = { u, limit: u.enumLimit ?? DEFAULT_LIMIT, work: u.workLimit ?? DEFAULT_WORK, carrierSets: new Map() };
     baseCache.set(u, b);
   }
-  return { ...b, track: { bounded: false } };
+  return { ...b, track: { bounded: false }, budget: null };
 }
 function carrier(name: string, c: Ctx): SetLike | undefined {
   let s = c.carrierSets.get(name);
@@ -170,6 +218,10 @@ export function evalTermChecked(t: Term, env: Env, u: Universe): Checked<Value> 
 
 /** Is `v` an element of the (possibly lazy) set `s`? Exact, also for ℕ, ℙ S, X ⇸ Y, … */
 export function memberOf(v: Value, s: SetLike, u: Universe): boolean {
+  if (s.k === 'set' && v.k !== 'lazy') {
+    spend();
+    return s.index.has(valueKey(v)); // (the searches test a lot of these)
+  }
   return member(v, s, ctxOf(u));
 }
 
@@ -226,7 +278,14 @@ export function isInfiniteSet(s: SetLike, u: Universe): boolean | null {
 
 // ── expressions ────────────────────────────────────────────────────────────────
 
+/** Count `n` units of work (the work clock and the limit of the current quantifier). */
+function charge(c: Ctx, n: number): void {
+  spend(n);
+  if (c.budget) c.budget.left -= n;
+}
+
 function ev(t: Term, env: Env, c: Ctx): Value {
+  charge(c, 1);
   switch (t.kind) {
     case 'name': {
       const v = env.get(t.name);
@@ -242,11 +301,11 @@ function ev(t: Term, env: Env, c: Ctx): Value {
     case 'emptyset':
       return EMPTY;
     case 'setDisplay':
-      return mkSet(t.elems.map((e) => ev(e, env, c)));
+      return mkSet(t.elems.map((e) => inner(ev(e, env, c), c)));
     case 'setComp':
       return comprehension(t, env, c);
     case 'tuple':
-      return tuple(t.elems.map((e) => ev(e, env, c)));
+      return tuple(t.elems.map((e) => inner(ev(e, env, c), c)));
     case 'cross': {
       const sets = t.elems.map((e) => asSetLike(ev(e, env, c), e));
       return smallOrLazy({ kind: 'cross', sets }, c);
@@ -279,43 +338,38 @@ function ev(t: Term, env: Env, c: Ctx): Value {
 }
 
 let approxIds = 0;
-/** Membership tests of approx sets (comprehensions without `• e`). */
+/** Membership tests of approx sets (comprehensions without `. e`). */
 const approxMembers = new WeakMap<LazySetValue, (v: Value, c: Ctx) => boolean>();
 
-/** `{ x : S | P • e }`. Over an infinite set the result is an `approx` set. */
+/** `{ x ∈ S | P . e }`. Over an infinite set the result is an `approx` set. */
 function comprehension(t: Extract<Term, { kind: 'setComp' }>, env: Env, c: Ctx): Value {
   const names = t.decls.flatMap((d) => d.names.map((n) => n.name));
-  const info = { cut: false };
+  const st: BindState = { cut: false, unsure: false };
   const out: Value[] = [];
-  let unsure = false; // some element test relied on a cut-off
   let generic = false; // an element contains a generic atom: there are infinitely many such
-  for (const { env: env2, probe } of bindings(t.decls, env, c, t, info)) {
-    try {
-      let ok = true;
-      if (t.pred) {
-        const [p, pb] = tracked(c, () => pred(t.pred!, env2, c));
-        ok = p;
-        unsure ||= pb;
-      }
-      if (!ok) continue;
-      let v: Value;
-      if (t.expr) {
+  eachBinding(t, env, c, st, (env2, probe, gb) => {
+    // (the guards — the conjuncts of the predicate — hold here)
+    if (gb) st.unsure = true;
+    let v: Value;
+    if (t.expr) {
+      try {
         const [e, eb] = tracked(c, () => ev(t.expr!, env2, c));
-        v = e;
-        unsure ||= eb;
-      } else v = names.length === 1 ? env2.get(names[0])! : tuple(names.map((n) => env2.get(n)!));
-      if (containsFresh(v)) generic = true;
-      else out.push(v);
-    } catch (e) {
-      if (probe && e instanceof EvalError) {
-        unsure = true;
-        continue;
+        v = inner(e, c);
+        if (eb) st.unsure = true;
+      } catch (e) {
+        if (probe && e instanceof EvalError) {
+          st.unsure = true;
+          return false;
+        }
+        throw e;
       }
-      throw e;
-    }
-  }
-  if (unsure) c.track.bounded = true;
-  if (!info.cut && !generic) return mkSet(out);
+    } else v = names.length === 1 ? env2.get(names[0])! : tuple(names.map((n) => env2.get(n)!));
+    if (containsFresh(v)) generic = true;
+    else out.push(v);
+    return false;
+  });
+  if (st.unsure) c.track.bounded = true;
+  if (!st.cut && !generic) return mkSet(out);
   const s = lazy({ kind: 'approx', id: ++approxIds, known: mkSet(out), infinite: generic });
   if (!t.expr) approxMembers.set(s, (v, c2) => compMember(t, env, names, v, c2));
   return s;
@@ -343,7 +397,7 @@ function evBinop(t: Extract<Term, { kind: 'binop' }>, env: Env, c: Ctx): Value {
   const r = ev(t.right, env, c);
   switch (t.op) {
     case '↦':
-      return pair(l, r);
+      return pair(inner(l, c), inner(r, c));
     case '↔':
       return lazy({ kind: 'rel', from: asSetLike(l, t.left), to: asSetLike(r, t.right) });
     case '⇸':
@@ -351,17 +405,25 @@ function evBinop(t: Extract<Term, { kind: 'binop' }>, env: Env, c: Ctx): Value {
     case '→':
       return lazy({ kind: 'tfun', from: asSetLike(l, t.left), to: asSetLike(r, t.right) });
     case '∪':
-      return mkSet([...finite(l, t.left, c).elems, ...finite(r, t.right, c).elems]);
-    case '∩': {
+    case '∩':
+    case '∖': {
       const ls = asSetLike(l, t.left);
       const rs = asSetLike(r, t.right);
-      if (ls.k === 'set') return mkSet(ls.elems.filter((e) => member(e, rs, c)));
-      if (rs.k === 'set') return mkSet(rs.elems.filter((e) => member(e, ls, c)));
-      return mkSet(finite(l, t.left, c).elems.filter((e) => member(e, rs, c)));
-    }
-    case '∖': {
-      const rs = asSetLike(r, t.right);
-      return mkSet(finite(l, t.left, c).elems.filter((e) => !member(e, rs, c)));
+      const fl = exactFinite(ls, c);
+      const fr = exactFinite(rs, c);
+      if (t.op === '∪' && fl && fr) {
+        charge(c, fl.elems.length + fr.elems.length);
+        return mkSet([...fl.elems, ...fr.elems]);
+      }
+      // list a finite side, test membership in the other
+      const list = t.op === '∩' ? (fl ?? fr) : t.op === '∖' ? fl : null;
+      if (list) {
+        charge(c, list.elems.length);
+        const other = list === fl ? rs : ls;
+        return mkSet(list.elems.filter((e) => member(e, other, c) === (t.op === '∩')));
+      }
+      // sets that cannot be listed (PATIENT × DRUG, ℕ, …): exact membership only
+      return lazy({ kind: 'setop', op: t.op, left: ls, right: rs });
     }
     case '+':
       return int(asInt(l, t.left) + asInt(r, t.right));
@@ -373,7 +435,9 @@ function evBinop(t: Extract<Term, { kind: 'binop' }>, env: Env, c: Ctx): Value {
     case 'mod': {
       const a = asInt(l, t.left);
       const b = asInt(r, t.right);
-      if (b === 0) throw new EvalError(`${q(printTerm(t))} is undefined: division by zero`, t.span, 'undefined');
+      if (b === 0) {
+        throw new EvalError(`${q(printTerm(t))} is undefined: division by zero`, t.span, 'undefined', () => `${printTerm(t)} is undefined when ${printTerm(t.right)} = 0`);
+      }
       const d = Math.floor(a / b); // Z: a div b rounds down, a mod b = a - b * (a div b)
       return int(t.op === 'div' ? d : a - b * d);
     }
@@ -383,20 +447,33 @@ function evBinop(t: Extract<Term, { kind: 'binop' }>, env: Env, c: Ctx): Value {
 }
 
 /** f(x): the unique y with (x, y) ∈ f. */
-function applyFn(t: Extract<Term, { kind: 'apply' }>, f: Value, x: Value, c: Ctx): Value {
+function applyFn(t: Extract<Term, { kind: 'apply' }>, f: Value, x0: Value, c: Ctx): Value {
+  const x = inner(x0, c);
   const fs = finite(f, t.fn, c);
   const results = functionIndex(fs, t.fn).get(valueKey(x)) ?? [];
-  const fnText = t.fn.kind === 'name' || t.fn.kind === 'apply' ? printTerm(t.fn) : `(${printTerm(t.fn)})`;
-  const call = `${fnText}(${printValue(x)})`;
+  if (results.length === 1) return results[0];
+  // (messages are built only when shown: the searches run into undefined applications often)
+  // `cleared(a₁) is undefined: a₁ = DLH4AB ∉ dom cleared` names the argument as written
+  // and its value, so that the line it comes from is easy to find
+  const fnText = () => (t.fn.kind === 'name' || t.fn.kind === 'apply' ? printTerm(t.fn) : `(${printTerm(t.fn)})`);
+  const argText = () => {
+    const a = printTerm(t.arg);
+    const v = printValue(x);
+    return a === v || t.arg.kind === 'num' ? [v, v] : [a, `${a} = ${v}`];
+  };
+  const call = () => `${fnText()}(${argText()[0]})`;
+  const written = () => `${fnText()}(${printTerm(t.arg)})`;
   if (results.length === 0) {
-    const dom = printTerm({ kind: 'unop', op: 'dom', arg: t.fn, span: t.fn.span });
-    throw new EvalError(`${call} is undefined: ${printValue(x)} ∉ ${dom}`, t.span, 'undefined');
+    const dom = () => printTerm({ kind: 'unop', op: 'dom', arg: t.fn, span: t.fn.span });
+    throw new EvalError(() => `${call()} is undefined: ${argText()[1]} ∉ ${dom()}`, t.span, 'undefined', () => `${written()} is undefined when ${printTerm(t.arg)} ∉ ${dom()}`);
   }
-  if (results.length > 1) {
-    const vals = results.map(printValue).join(', ');
-    throw new EvalError(`${call} is undefined: ${fnText} relates ${printValue(x)} to several values (${vals})`, t.span, 'undefined');
-  }
-  return results[0];
+  const vals = results.map(printValue).join(', ');
+  throw new EvalError(
+    () => `${call()} is undefined: ${fnText()} relates ${argText()[1]} to several values (${vals})`,
+    t.span,
+    'undefined',
+    () => `${written()} is undefined when ${fnText()} relates ${printTerm(t.arg)} to several values`,
+  );
 }
 
 const fnIndexCache = new WeakMap<SetValue, Map<string, Value[]>>();
@@ -418,6 +495,7 @@ function functionIndex(s: SetValue, at: Term): Map<string, Value[]> {
 // ── predicates ─────────────────────────────────────────────────────────────────
 
 function pred(t: Term, env: Env, c: Ctx): boolean {
+  charge(c, 1);
   switch (t.kind) {
     case 'bool':
       return t.value;
@@ -474,66 +552,203 @@ function pred(t: Term, env: Env, c: Ctx): boolean {
  * ∀ / ∃. A counterexample (∀) or witness (∃) whose evaluation did not rely on a
  * cut-off decides exactly; otherwise the verdict is bounded if the listing was cut.
  */
-function quantifier(t: Extract<Term, { kind: 'quant' }>, env: Env, c: Ctx): boolean {
-  const info = { cut: false };
-  let unsure = false;
+function quantifier(t: Quant, env: Env, c: Ctx): boolean {
+  const st: BindState = { cut: false, unsure: false };
   let unsureHit = false;
-  for (const { env: env2, probe } of bindings(t.decls, env, c, t, info)) {
-    let gb = false;
-    let b: boolean;
-    let bb: boolean;
-    try {
-      if (t.pred) {
-        const [g, gbound] = tracked(c, () => pred(t.pred!, env2, c));
-        gb = gbound;
-        if (!g) {
-          unsure ||= gb;
-          continue;
+  let exactHit = false;
+  const rest = binderPlan(t).rest;
+  eachBinding(t, env, c, st, (env2, probe, gb) => {
+    // the guards hold; ∀: the body (or the consequent of `A ⇒ B`) decides; ∃: a witness
+    let b = true;
+    let bb = false;
+    if (rest) {
+      try {
+        [b, bb] = tracked(c, () => pred(rest, env2, c));
+      } catch (e) {
+        if (probe && e instanceof EvalError) {
+          st.unsure = true;
+          return false;
         }
+        throw e;
       }
-      [b, bb] = tracked(c, () => pred(t.body, env2, c));
-    } catch (e) {
-      if (probe && e instanceof EvalError) {
-        unsure = true;
-        continue;
-      }
-      throw e;
     }
     const hit = t.q === '∀' ? !b : b;
-    if (hit && !gb && !bb) return t.q === '∃';
+    if (hit && !gb && !bb) return (exactHit = true);
     if (hit) unsureHit = true;
-    unsure ||= gb || bb;
-  }
-  if (unsureHit || unsure || info.cut) c.track.bounded = true;
+    if (gb || bb) st.unsure = true;
+    return false;
+  });
+  if (exactHit) return t.q === '∃';
+  if (unsureHit || st.unsure || st.cut) c.track.bounded = true;
   return unsureHit ? t.q === '∃' : t.q === '∀';
 }
 
-/** All environments for `x : S; y : T` (sequential: T may depend on x). */
-function* bindings(
-  decls: VarDecl[],
+// ── bindings of quantifiers and comprehensions ─────────────────────────────────
+//
+// `∀ D | P . Q` is `∀ D . P ⇒ Q`, `∃ D | P . Q` is `∃ D . P ∧ Q`, `{ D | P . e }`
+// collects e where P holds. The conjuncts of P (and of the antecedent A of a body
+// `A ⇒ B` for ∀, of the body for ∃) are *guards*: each is evaluated as soon as its
+// variables are bound, and a false guard skips all further bindings below. This is
+// cheap pruning, and it is also what Z means: `∀ b ∈ BOOK; m ∈ f(b) | b ∈ dom f . …`
+// holds whatever f(b) would be for b ∉ dom f, so f(b) is never evaluated there.
+// Variables whose declared sets do not mention bound variables are bound in the
+// order the guards need them (∀ a, b ∈ NAME; d ∈ DATE | (a ↦ d) ∈ f … binds a, d first).
+
+type Quant = Extract<Term, { kind: 'quant' }>;
+type Binder = Quant | Extract<Term, { kind: 'setComp' }>;
+
+interface BindState {
+  /** Not all bindings were tried (ℕ / ℤ window, or the work limit). */
+  cut: boolean;
+  /** Some verdict on the way relied on a cut-off. */
+  unsure: boolean;
+}
+
+interface BinderPlan {
+  names: { name: string; type: Term }[];
+  guards: { term: Term; need: number }[];
+  /** What a binding that passes the guards still has to satisfy (∀: Q, or B of `A ⇒ B`; ∃ / {…}: nothing). */
+  rest: Term | null;
+  /** No declared set mentions a bound variable (each is evaluated once). */
+  closed: boolean;
+}
+
+const planCache = new WeakMap<Binder, BinderPlan>();
+const conjOf = (t: Term): Term[] => (t.kind === 'logic' && t.op === '∧' ? [...conjOf(t.left), ...conjOf(t.right)] : [t]);
+
+function binderPlan(t: Binder): BinderPlan {
+  let p = planCache.get(t);
+  if (p) return p;
+  let names = t.decls.flatMap((d: VarDecl) => d.names.map((n) => ({ name: n.name, type: d.type })));
+  const terms = t.pred ? conjOf(t.pred) : [];
+  let rest: Term | null = null;
+  if (t.kind === 'quant' && t.q === '∀') {
+    if (t.body.kind === 'logic' && t.body.op === '⇒') {
+      terms.push(...conjOf(t.body.left));
+      rest = t.body.right;
+    } else rest = t.body;
+  } else if (t.kind === 'quant') terms.push(...conjOf(t.body));
+  const bound = new Set(names.map((n) => n.name));
+  const closed = bound.size === names.length && names.every((n) => ![...freeVars(n.type)].some((f) => bound.has(f)));
+  if (closed && terms.length) {
+    const order: typeof names = [];
+    for (const g of terms) {
+      const fv = freeVars(g);
+      for (const n of names) if (fv.has(n.name) && !order.includes(n)) order.push(n);
+    }
+    for (const n of names) if (!order.includes(n)) order.push(n);
+    names = order;
+  }
+  const pos = new Map(names.map((n, i) => [n.name, i]));
+  const needOf = (x: Term) => {
+    let need = -1;
+    for (const f of freeVars(x)) {
+      const i = pos.get(f);
+      if (i !== undefined && i > need) need = i;
+    }
+    return need;
+  };
+  p = { names, guards: terms.map((term) => ({ term, need: needOf(term) })), rest, closed };
+  planCache.set(t, p);
+  return p;
+}
+
+/**
+ * Enumerate the bindings of a quantifier or comprehension that pass its guards and call
+ * `leaf(env, probe, guardsBounded)` for each (the env is reused: read it right away);
+ * `leaf` returns true to stop. Errors in guards are left to the leaves (a probe number
+ * beyond the ℕ / ℤ window may run into them: that is not a verdict).
+ */
+function eachBinding(
+  t: Binder,
   env: Env,
   c: Ctx,
-  at: Term,
-  info: { cut: boolean },
-): Generator<{ env: Env; probe: boolean }> {
-  const names = decls.flatMap((d) => d.names.map((n) => ({ name: n.name, decl: d })));
-  function* go(i: number, cur: Map<string, Value>, probe: boolean): Generator<{ env: Env; probe: boolean }> {
-    if (i === names.length) {
-      yield { env: cur, probe };
-      return;
+  st: BindState,
+  leaf: (env: Env, probe: boolean, gb: boolean) => boolean,
+): void {
+  const { names, guards, closed } = binderPlan(t);
+  const own = !c.budget;
+  if (own) c.budget = { left: c.work };
+  const budget = c.budget!;
+  const cur = new Map(env);
+  // values the bound names have outside (restored when a level is done, so that a
+  // declared set never sees a stale binding of a later variable)
+  const outer = names.map((n) => env.get(n.name));
+  const lists: (Listing | undefined)[] = [];
+  const go = (i: number, g: number, probe: boolean, gb: boolean, deferred: boolean): boolean => {
+    for (; g < guards.length && guards[g].need < i && (!deferred || i === names.length); g++) {
+      let ok: boolean;
+      let b: boolean;
+      try {
+        [ok, b] = tracked(c, () => pred(guards[g].term, cur, c));
+      } catch (e) {
+        if (i < names.length) {
+          deferred = true; // decided at the leaves below
+          break;
+        }
+        if (probe && e instanceof EvalError) {
+          st.unsure = true;
+          return false;
+        }
+        throw e;
+      }
+      if (!ok) {
+        if (b) st.unsure = true;
+        return false;
+      }
+      gb ||= b;
     }
-    const { name, decl } = names[i];
-    const s = asSetLike(ev(decl.type, cur, c), decl.type);
-    const L = listFor(s, c, cur);
-    if (!L) throw new EvalError(`Too many values to check in ${q(printTerm(decl.type))}`, at.span, 'too-large');
-    if (L.cut) info.cut = true;
+    if (i === names.length) return leaf(cur, probe, gb);
+    const { name, type } = names[i];
+    let L = lists[i];
+    if (!L) {
+      const s = asSetLike(ev(type, cur, c), type);
+      const got = listFor(s, c, cur);
+      if (!got) throw new EvalError(() => `Too many values to check in ${q(printTerm(type))}`, t.span, 'too-large');
+      L = got;
+      // (listings of ℕ, ℤ and infinite given sets depend on the values bound so far)
+      if (closed && (s.k === 'set' || ['power', 'rel', 'pfun', 'tfun', 'approx'].includes(s.desc.kind))) lists[i] = L;
+    }
+    if (L.cut) st.cut = true;
     for (const it of L.items) {
-      const next = new Map(cur);
-      next.set(name, it.v);
-      yield* go(i + 1, next, probe || it.probe);
+      if (budget.left <= 0) {
+        st.cut = true;
+        return true;
+      }
+      cur.set(name, it.v);
+      if (go(i + 1, g, probe || it.probe, gb, deferred)) return true;
     }
+    const o = outer[i];
+    if (o === undefined) cur.delete(name);
+    else cur.set(name, o);
+    return false;
+  };
+  try {
+    go(0, 0, false, false, false);
+  } finally {
+    if (own) c.budget = null;
   }
-  yield* go(0, new Map(env), false);
+}
+
+/**
+ * The bindings of `∀ D | P . Q` that fail, exactly as the evaluator enumerates them
+ * (same order, guards and work limit): `onFail(env)` for each binding whose body is
+ * false or undefined, until it returns true. Used to grade how badly a ∀ fails.
+ */
+export function failingBindings(t: Quant, env: Env, u: Universe, onFail: (env: Env) => boolean): void {
+  const c = ctxOf(u);
+  const rest = binderPlan(t).rest;
+  if (t.q !== '∀' || !rest) return;
+  const st: BindState = { cut: false, unsure: false };
+  eachBinding(t, env, c, st, (env2, probe) => {
+    let ok: boolean;
+    try {
+      ok = pred(rest, env2, c);
+    } catch (e) {
+      ok = probe && e instanceof EvalError;
+    }
+    return ok ? false : onFail(env2);
+  });
 }
 
 function subset(l: Value, r: Value, t: Extract<Term, { kind: 'rel' }>, c: Ctx): boolean {
@@ -580,8 +795,18 @@ function listedIn(a: SetLike, b: SetLike, c: Ctx): boolean {
 
 // ── sets ───────────────────────────────────────────────────────────────────────
 
+/**
+ * A value as an element of a set or tuple: a lazy set that is finite and small enough
+ * becomes a finite set, so that `ℙ {1}` and `{∅, {1}}` are the same element (finite
+ * sets are compared by their elements' keys).
+ */
+function inner(v: Value, c: Ctx): Value {
+  return v.k === 'lazy' ? (exactFinite(v, c) ?? v) : v;
+}
+
 function member(v: Value, s: SetLike, c: Ctx): boolean {
-  if (s.k === 'set') return s.index.has(valueKey(v));
+  spend();
+  if (s.k === 'set') return s.index.has(valueKey(inner(v, c)));
   const d = s.desc;
   switch (d.kind) {
     case 'nat':
@@ -609,6 +834,8 @@ function member(v: Value, s: SetLike, c: Ctx): boolean {
     }
     case 'cross':
       return v.k === 'tuple' && v.elems.length === d.sets.length && v.elems.every((e, i) => member(e, d.sets[i], c));
+    case 'setop':
+      return d.op === '∪' ? member(v, d.left, c) || member(v, d.right, c) : member(v, d.left, c) && member(v, d.right, c) === (d.op === '∩');
     case 'power': {
       const fs = v.k === 'set' ? v : v.k === 'lazy' ? exactFinite(v, c) : null;
       return !!fs && fs.elems.every((e) => member(e, d.base, c));
@@ -630,7 +857,15 @@ function member(v: Value, s: SetLike, c: Ctx): boolean {
       }
       if (d.kind === 'tfun') {
         const dom = d.from.k === 'set' ? d.from : exactFinite(d.from, c);
-        if (!dom) return false; // a finite function cannot be total on an infinite set
+        if (!dom) {
+          // on an infinite given set an example can only show the function at its example
+          // elements: total there counts, as a bounded verdict
+          if (d.from.k === 'lazy' && d.from.desc.kind === 'given') {
+            c.track.bounded = true;
+            return d.from.desc.sample.elems.every((x) => seen.has(valueKey(x)));
+          }
+          return false; // a finite function cannot be total on ℕ, ℤ, …
+        }
         return dom.elems.every((x) => seen.has(valueKey(x)));
       }
       return true;
@@ -684,6 +919,13 @@ function infiniteSet(s: SetLike, c: Ctx): boolean | null {
       if (parts.some((p) => p === true) && d.sets.every(nonEmpty)) return true;
       return null;
     }
+    case 'setop': {
+      const a = infiniteSet(d.left, c);
+      const b = infiniteSet(d.right, c);
+      if (d.op === '∪') return a === true || b === true ? true : a === false && b === false ? false : null;
+      if (a === false || (d.op === '∩' && b === false)) return false;
+      return d.op === '∖' && a === true && b === false ? true : null;
+    }
   }
 }
 
@@ -697,6 +939,8 @@ function nonEmpty(s: SetLike): boolean {
       return d.known.elems.length > 0 || d.infinite;
     case 'cross':
       return d.sets.every(nonEmpty);
+    case 'setop':
+      return d.op === '∪' && (nonEmpty(d.left) || nonEmpty(d.right)); // (∩, ∖: not known)
     default:
       return true; // ℕ, ℤ, given sets; ℙ S, X ↔ Y, X ⇸ Y contain ∅
   }
@@ -743,6 +987,16 @@ function enumerate(s: SetLike, c: Ctx, bounded: boolean): Value[] | null {
       const parts = d.sets.map(sub);
       if (parts.some((p) => p === null)) return null;
       return cartesian(parts as Value[][], c)?.map((es) => tuple(es)) ?? null;
+    }
+    case 'setop': {
+      const a = sub(d.left);
+      if (d.op === '∪') {
+        const b = sub(d.right);
+        return a && b ? mkSet([...a, ...b]).elems.slice() : null;
+      }
+      if (a) return a.filter((e) => member(e, d.right, c) === (d.op === '∩'));
+      const b = d.op === '∩' ? sub(d.right) : null;
+      return b && b.filter((e) => member(e, d.left, c));
     }
     case 'power': {
       const base = sub(d.base);
@@ -792,9 +1046,12 @@ function listFor(s: SetLike, c: Ctx, env: Env): Listing | null {
   const d = s.desc;
   switch (d.kind) {
     case 'given': {
-      // exact: the carrier, the generic atoms already in use, and one new generic atom
+      // exact: the carrier, the generic atoms already in use, and one new generic atom.
+      // The new one counts as a probe: if a value is undefined there (a total function
+      // X → Y can only be shown on the example elements), that is not a verdict.
       const used = freshAtomsIn(env, d.set);
-      return plain([...d.sample.elems, ...used, freshAtom(d.set, used.length + 1)], false);
+      const items = plain([...d.sample.elems, ...used], false).items;
+      return { items: [...items, { v: freshAtom(d.set, used.length + 1), probe: true }], cut: false };
     }
     case 'nat':
     case 'nat1':
@@ -802,18 +1059,45 @@ function listFor(s: SetLike, c: Ctx, env: Env): Listing | null {
       const lo = d.kind === 'nat' ? 0 : d.kind === 'nat1' ? 1 : -Infinity;
       const window = intRange(Math.max(lo, c.u.intMin), c.u.intMax, c);
       if (!window) return null;
-      const extra = probeNumbers(c, lo, Infinity).map((n) => ({ v: int(n), probe: true }));
+      const extra = probeNumbers(c, lo, Infinity, env).map((n) => ({ v: int(n), probe: true }));
       return { items: [...plain(window, true).items, ...extra], cut: true };
     }
     case 'range': {
       const all = intRange(d.lo, d.hi, c);
       if (all) return plain(all, false);
       const window = intRange(Math.max(d.lo, c.u.intMin), Math.min(d.hi, c.u.intMax), c) ?? [];
-      const extra = [d.lo, d.hi, ...probeNumbers(c, d.lo, d.hi)].filter((n) => n < c.u.intMin || n > c.u.intMax);
+      const extra = [d.lo, d.hi, ...probeNumbers(c, d.lo, d.hi, env)].filter((n) => n < c.u.intMin || n > c.u.intMax);
       return { items: [...plain(window, true).items, ...[...new Set(extra)].map((n) => ({ v: int(n), probe: true }))], cut: true };
+    }
+    case 'cross': {
+      // X × Y over infinite given sets: like `x ∈ X; y ∈ Y` (each part listed exactly)
+      const parts: Listing[] = [];
+      for (const p of d.sets) {
+        const L = listFor(p, c, env);
+        if (!L) return null;
+        parts.push(L);
+      }
+      if (parts.reduce((n, p) => n * p.items.length, 1) > c.limit) return null;
+      let acc: { vs: Value[]; probe: boolean }[] = [{ vs: [], probe: false }];
+      for (const p of parts) acc = acc.flatMap((a) => p.items.map((it) => ({ vs: [...a.vs, it.v], probe: a.probe || it.probe })));
+      return { items: acc.map((a) => ({ v: tuple(a.vs), probe: a.probe })), cut: parts.some((p) => p.cut) };
     }
     case 'approx':
       return plain(d.known.elems, true);
+    case 'setop': {
+      // list a side exactly (as quantifiers do), keep what is in the set
+      const L = listFor(d.left, c, env);
+      if (d.op === '∪') {
+        const R = listFor(d.right, c, env);
+        if (!L || !R) return null;
+        const seen = new Set<string>();
+        const items = [...L.items, ...R.items].filter((it) => !seen.has(valueKey(it.v)) && !!seen.add(valueKey(it.v)));
+        return { items, cut: L.cut || R.cut };
+      }
+      if (L) return { items: L.items.filter((it) => member(it.v, d.right, c) === (d.op === '∩')), cut: L.cut };
+      const R = d.op === '∩' ? listFor(d.right, c, env) : null;
+      return R && { items: R.items.filter((it) => member(it.v, d.left, c)), cut: R.cut };
+    }
     default: {
       const exact = enumerate(s, c, false);
       if (exact) return plain(exact, false);
@@ -823,12 +1107,29 @@ function listFor(s: SetLike, c: Ctx, env: Env): Listing | null {
   }
 }
 
-/** Numbers beyond the window [intMin, intMax] (inside [lo, hi]) worth trying. */
-function probeNumbers(c: Ctx, lo: number, hi: number): number[] {
+/**
+ * Numbers beyond the window [intMin, intMax] (inside [lo, hi]) worth trying: a few fixed
+ * ones, the numbers of the spec, and the numbers of the current values with their
+ * neighbours and negatives (balance −20 with overdraft 10: ∀ b ∈ ℤ must try −20).
+ */
+function probeNumbers(c: Ctx, lo: number, hi: number, env?: Env): number[] {
   const { intMin, intMax } = c.u;
   const cands = [intMax + 1, intMax + 2, ...PROBES, intMin - 1, ...PROBES.map((n) => -n), ...(c.u.probes ?? [])];
+  if (env) for (const n of numbersIn(env)) cands.push(n, n - 1, n + 1, -n);
   const out = new Set<number>();
   for (const n of cands) if (Number.isSafeInteger(n) && n >= lo && n <= hi && (n < intMin || n > intMax)) out.add(n);
+  return [...out];
+}
+
+/** The numbers in the values of an environment (at most 200). */
+function numbersIn(env: Env): number[] {
+  const out = new Set<number>();
+  const walk = (v: Value): void => {
+    if (out.size >= 200) return;
+    if (v.k === 'int') out.add(v.v);
+    else if (v.k === 'tuple' || v.k === 'set') for (const e of v.elems) walk(e);
+  };
+  for (const v of env.values()) walk(v);
   return [...out];
 }
 
@@ -844,15 +1145,13 @@ function freshAtom(set: string, i: number): AtomValue {
   return a;
 }
 
-/** Distinct generic atoms of `set` in the values of `env`. */
+/**
+ * Distinct generic atoms of `set` bound in `env`. (Only quantifier and comprehension
+ * variables over the given set itself can hold one; example values never do.)
+ */
 function freshAtomsIn(env: Env, set: string): AtomValue[] {
   const found = new Map<string, AtomValue>();
-  const scan = (v: Value) => {
-    if (v.k === 'atom') {
-      if (v.fresh && v.set === set) found.set(v.name, v);
-    } else if (v.k === 'tuple' || v.k === 'set') v.elems.forEach(scan);
-  };
-  for (const v of env.values()) scan(v);
+  for (const v of env.values()) if (v.k === 'atom' && v.fresh && v.set === set) found.set(v.name, v);
   return [...found.values()];
 }
 
@@ -909,6 +1208,14 @@ function finite(v: Value, at: Term, c: Ctx): SetValue {
   if (s.desc.kind === 'approx') {
     c.track.bounded = true;
     return mkSet(s.desc.known.elems.filter((e) => !containsFresh(e)));
+  }
+  if (s.desc.kind === 'setop' || s.desc.kind === 'cross') {
+    // e.g. #(PATIENT × DRUG): only the example elements can be counted
+    const some = enumerate(s, c, true);
+    if (some) {
+      c.track.bounded = true;
+      return mkSet(some.filter((e) => !containsFresh(e)));
+    }
   }
   throw new EvalError(`${q(printTerm(at))} is too large to compute with`, at.span, 'too-large');
 }

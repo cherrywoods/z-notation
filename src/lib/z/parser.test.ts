@@ -147,7 +147,7 @@ describe('atoms, sets and quantifiers', () => {
     ['{ x : S; y : T | x = y • x ↦ y }', '{| x:S y:T | (= x y) • (↦ x y)}'],
     ['{ x : S • f(x) }', '{| x:S • (@ f x)}'],
     ['{ x, y ∈ S | x ≠ y }', '{| x,y:S | (≠ x y)}'],
-    ['{x ∈ S}', '{(∈ x S)}'],
+    ['{x ∈ S}', '{| x:S}'],
     ['{x ∈ S, y}', '{(∈ x S) y}'],
     ['∀ x : S • P', '(∀ [x:S] P)'],
     ['∀ x ∈ S • P', '(∀ [x:S] P)'],
@@ -163,6 +163,44 @@ describe('atoms, sets and quantifiers', () => {
   it('accepts ASCII spellings', () => {
     expect(tree("x' in S /\\ y |-> z notin R")).toBe('(∧ (∈ x′ S) (∉ (↦ y z) R))');
     expect(tree('forall f : A -|> B @ dom f <: A => not f = {}')).toBe('(∀ [f:(⇸ A B)] (⇒ (⊆ (dom f) A) (¬ (= f ∅))))');
+  });
+});
+
+describe('the tutorial notation: ∀ x ∈ S . P', () => {
+  it.each([
+    ['∀ x ∈ S . P', '(∀ [x:S] P)'],
+    ['∃ x ∈ S . P ∧ Q', '(∃ [x:S] (∧ P Q))'],
+    ['∀ x, y ∈ S; z ∈ T | x ≠ y . z ∈ U', '(∀ [x,y:S z:T] (≠ x y) (∈ z U))'],
+    ['∀ x ∈ S . ∃ y ∈ T . R', '(∀ [x:S] (∃ [y:T] R))'],
+    ['{ x ∈ S | P . e }', '{| x:S | P • e}'],
+    ['{ x ∈ S . f(x) }', '{| x:S • (@ f x)}'],
+    ['{ x, y ∈ S | x ≠ y . x ↦ y }', '{| x,y:S | (≠ x y) • (↦ x y)}'],
+    // `x : S` and the bullet are still accepted
+    ['∀ x : S • P', '(∀ [x:S] P)'],
+    ['∀ x ∈ S ⦁ P', '(∀ [x:S] P)'],
+    ['∀ x ∈ S @ P', '(∀ [x:S] P)'],
+    // the range `..` wins over the spot, also without spaces
+    ['∀ n ∈ 1 .. 5 . n > 0', '(∀ [n:(.. 1 5)] (> n 0))'],
+    ['∀ n ∈ 1..10.n > 0', '(∀ [n:(.. 1 10)] (> n 0))'],
+    ['∀ x ∈ S.x ∈ T', '(∀ [x:S] (∈ x T))'],
+  ])('%s', (src, expected) => expect(tree(src)).toBe(expected));
+
+  it('lexes the spot and its aliases as ‘.’', () => {
+    for (const src of ['.', '•', '⦁', '@']) expect(lex(src)[0]).toMatchObject({ kind: 'sym', value: '.', symbolId: 'spot' });
+    expect(lex('..')[0]).toMatchObject({ kind: 'sym', value: '..' });
+  });
+
+  it('does not misread a period between digits or names', () => {
+    expect(errorOf('x = 2.5')).toBe('Only whole numbers are part of this tutorial.');
+    expect(errorOf('x = 1.')).toBe('Only whole numbers are part of this tutorial.');
+    expect(errorOf('x = .5')).toBe('Only whole numbers are part of this tutorial.');
+    expect(errorOf('a.b = c')).toBe('Unexpected ‘.’ — it is used in ∀ x ∈ S . P and in { x ∈ S | P . e }');
+    expect(errorOf('∀ x ∈ S')).toBe('Expected ‘.’ and a predicate, e.g. ‘∀ x ∈ S . P’');
+    expect(errorOf('∀ x ∈ S . ')).toBe('Expected something after ‘.’');
+  });
+
+  it('continues a predicate over lines at the spot', () => {
+    expect(parsePreds('∀ x ∈ S .\n  x ∈ T\n∃ y ∈ S\n  . y ∈ T').preds.map(sx)).toEqual(['(∀ [x:S] (∈ x T))', '(∃ [y:S] (∈ y T))']);
   });
 });
 
@@ -202,6 +240,38 @@ describe('friendly syntax errors', () => {
     expect(s.diagnostics[0]).toMatchObject({ from: 4, to: 6 });
   });
 
+  it('reads characters outside the BMP as one token each', () => {
+    expect(lex('x = 𝒜 😀').map((t) => [t.kind, t.value, t.from, t.to])).toEqual([
+      ['ident', 'x', 0, 1],
+      ['sym', '=', 2, 3],
+      ['error', '𝒜', 4, 6],
+      ['error', '😀', 7, 9],
+      ['eof', '', 9, 9],
+    ]);
+    expect(errorOf('x = 𝒜')).toBe('Unknown symbol ‘𝒜’');
+    expect(parseTerm('x = 𝒜').diagnostics[0]).toMatchObject({ from: 4, to: 6 });
+    // an emoji with a modifier or a variation selector is still one character
+    expect(lex('👍🏽 ❤️').filter((t) => t.kind === 'error').map((t) => t.value)).toEqual(['👍🏽', '❤️']);
+    expect(parseGiven('[A, 😀]').diagnostics[0]).toMatchObject({ from: 4, to: 6, message: 'Unknown symbol ‘😀’' });
+  });
+
+  it('does not take names like toString for table entries', () => {
+    for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__', 'valueOf']) {
+      expect(parsePreds(`${name} = 1`).diagnostics, name).toEqual([]);
+      expect(parseDecls(`${name} : ℕ`).diagnostics, name).toEqual([]);
+    }
+  });
+
+  it('parses nested unclosed braces in linear time', () => {
+    const t0 = performance.now();
+    const r = parsePreds('x = ' + '{a ∈ '.repeat(60));
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(r.diagnostics).toHaveLength(1);
+    // and the same for a deep, well-formed mix of displays and comprehensions
+    const deep = '{a ∈ '.repeat(30) + 'S' + ', b}'.repeat(30);
+    expect(parseTerm(`x ∈ ${deep}`).diagnostics).toEqual([]);
+  });
+
   it('explains common mistakes', () => {
     expect(errorOf('borrower(book?')).toBe('Missing ‘)’ to close this ‘(’');
     expect(parseTerm('borrower(book?').diagnostics[0]).toMatchObject({ from: 8, to: 9 });
@@ -219,11 +289,11 @@ describe('friendly syntax errors', () => {
     expect(errorOf('onLoan′′ = onLoan')).toBe('A name can have only one decoration (′, ? or !)');
     expect(errorOf('f()')).toMatch(/^Empty parentheses/);
     expect(errorOf('f[x]')).toMatch(/^Square brackets are only for given sets/);
-    expect(errorOf('∀ x : S')).toBe('Expected ‘•’ and a predicate, e.g. ‘∀ x : S • P’');
+    expect(errorOf('∀ x ∈ S')).toBe('Expected ‘.’ and a predicate, e.g. ‘∀ x ∈ S . P’');
     expect(errorOf('∀ x : • P')).toBe('Expected a type after ‘:’');
     expect(errorOf('2 x = y')).toBe('Missing operator before ‘x’');
     expect(errorOf('a = b)')).toBe('Unexpected ‘)’ — there is no matching opening bracket');
-    expect(errorOf('x : NAME')).toBe('Declarations like ‘x : T’ go above the line (or after ∀ / ∃)');
+    expect(errorOf('x : NAME')).toBe('Declarations like ‘x : T’ go above the line (after ∀ / ∃ write ‘x ∈ S’)');
     expect(errorOf('ΔState')).toBe('‘ΔState’ belongs in the declarations (above the line)');
   });
 });
@@ -354,7 +424,7 @@ describe('numbers', () => {
   it('lexes decimals as one token (to explain them), ranges and ℝ', () => {
     expect(toks('0.25 + 3')).toEqual(['number:0.25', 'sym:+', 'number:3']);
     expect(toks('1..5')).toEqual(['number:1', 'sym:..', 'number:5']);
-    expect(toks('2.Feb')).toEqual(['number:2', 'error:.', 'ident:Feb']); // only matters in example values
+    expect(toks('2.Feb')).toEqual(['number:2', 'sym:.', 'ident:Feb']); // only matters in example values
     expect(toks('ℝx')).toEqual(['error:ℝ', 'ident:x']); // ℝ never becomes part of a name
   });
 
@@ -417,6 +487,31 @@ describe('constructs that are not part of the tutorial', () => {
     expect(errorOf('f ∈ A >->> B')).toMatch(/^‘⤖’/);
     expect(tree('f ∈ A -> B')).toBe('(∈ f (→ A B))');
     expect(tree('a > -b')).toBe('(> a (neg b))');
+    // the whole ASCII arrow is one error, with the message of its symbol
+    expect(parseTerm('f ∈ A >-> B').diagnostics[0]).toMatchObject({ from: 6, to: 9 });
+    expect(lex('A >-> B').map((t) => [t.kind, t.value])).toEqual([
+      ['ident', 'A'],
+      ['error', '↣'],
+      ['ident', 'B'],
+      ['eof', ''],
+    ]);
+  });
+
+  it('recognises the ASCII relational image', () => {
+    const r = parseTerm('x ∈ prescribed(| {p?} |)');
+    expect(r.diagnostics).toHaveLength(1);
+    expect(r.diagnostics[0]).toMatchObject({ from: 14, to: 16 });
+    expect(r.diagnostics[0].message).toMatch(/^‘⦇ ⦈’ \(relational image\) is not part of this tutorial/);
+    expect(parsePreds('ds! = prescribed(|{p?}|)').diagnostics[0].message).toMatch(/^‘⦇ ⦈’ \(relational image\)/);
+    // brackets and bars that are not next to each other are not affected
+    expect(tree('{ x ∈ S | (x ↦ y) ∈ R }')).toBe('{| x:S | (∈ (↦ x y) R)}');
+  });
+
+  it('reads the long arrows of LaTeX (⟹ ⟺ ⟼) as ⇒ ⇔ ↦', () => {
+    expect(tree('p ⟹ q')).toBe('(⇒ p q)');
+    expect(tree('p ⟺ q')).toBe('(⇔ p q)');
+    expect(tree('x ⟼ y ∈ R')).toBe('(∈ (↦ x y) R)');
+    expect(errorOf('q ⇐ p')).toBe('Write ‘⇒’ with the two sides swapped (‘⇐’ is not part of this tutorial)');
   });
 
   it('points at the construct', () => {

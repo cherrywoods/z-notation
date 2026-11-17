@@ -1,7 +1,7 @@
 // Hash router (GitHub Pages friendly).
 //
 //   #/                       start page
-//   #/present                presentation mode (QR code) over the start page
+//   #/present                old presenter-mode link: App.svelte redirects it to the start page
 //   #/t/<topicId>/<step>     tutorial; step = 'about' | 'types' | 'state' | '<operation id>' | 'init' | 'spec'
 //
 // Browser back/forward works: every navigation is a history entry (unless `replace`).

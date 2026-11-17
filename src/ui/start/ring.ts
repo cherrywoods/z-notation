@@ -1,6 +1,6 @@
 // Geometry of the topic ring: n bubbles evenly spaced (by angle) on a circle that fits
-// the stage. The last bubble (own topic) sits at the bottom centre, the others follow
-// clockwise from the bottom left. Returns null if no reasonable ring fits (→ carousel).
+// the stage. Items are placed anti-clockwise from the east-most slot, in item order
+// (simplest system first, the own topic last). Returns null if no reasonable ring fits (→ carousel).
 
 export interface RingLayout {
   /** Bubble diameter (px, unscaled). */
@@ -29,10 +29,16 @@ export function ringLayout(w: number, h: number, n: number): RingLayout | null {
     const ry = Math.min(ry0, rx0);
     const rx = ry;
     if (ry <= 0) continue;
-    const points = Array.from({ length: n }, (_, k) => {
+    // n evenly spaced slots (one at the bottom); items fill them anti-clockwise,
+    // starting at the east-most slot
+    const slots = Array.from({ length: n }, (_, k) => {
       const a = Math.PI / 2 + ((k + 1) * 2 * Math.PI) / n;
       return { x: w / 2 + rx * Math.cos(a), y: h / 2 + ry * Math.sin(a) };
     });
+    let east = 0;
+    for (let k = 1; k < n; k++) if (slots[k].x > slots[east].x + 0.5) east = k;
+    // screen y points down, so a smaller angle is anti-clockwise
+    const points = Array.from({ length: n }, (_, i) => slots[(((east - i) % n) + n) % n]);
     let minDist = Infinity;
     for (let k = 0; k < n; k++) {
       const p = points[k];

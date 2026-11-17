@@ -4,16 +4,19 @@
 
 import type { Span, Term, VarDecl } from './ast';
 import type { SectionRef, ZDiagnostic } from '../spec/model';
-import { printTerm } from './print';
+import { isBangEquals, parseTerm } from './parser';
+import { freeVars, printTerm } from './print';
 import {
   BOOL,
   ERROR,
   INT,
   describeType,
+  isGround,
   pair,
   power,
   product,
   relationParts,
+  typeToString,
   type ZType,
 } from './types';
 
@@ -27,12 +30,17 @@ export type NameTerm = Extract<Term, { kind: 'name' }>;
 
 // ── unification ────────────────────────────────────────────────────────────────
 
+/**
+ * Ids of type variables, shared by all unifiers: a type that leaves one checker (the
+ * type of a declared variable) must not be confused with another checker's variables.
+ */
+let nextVarId = 0;
+
 export class Unifier {
   private subst = new Map<number, ZType>();
-  private nextId = 0;
 
   fresh(): ZType {
-    return { k: 'var', id: this.nextId++ };
+    return { k: 'var', id: nextVarId++ };
   }
 
   /** Follow variable bindings at the top level. */
@@ -126,9 +134,19 @@ export function quoteTerm(t: Term): string {
 const qt = quoteTerm;
 const qs = (s: string) => `‘${s}’`;
 
+/** Does the type still contain an unknown part (from ∅ or `{}`)? */
+function hasVar(t: ZType): boolean {
+  if (t.k === 'var') return true;
+  if (t.k === 'power') return hasVar(t.elem);
+  if (t.k === 'product') return t.elems.some(hasVar);
+  return false;
+}
+
 export class TypeChecker {
   readonly unifier = new Unifier();
   private errors = 0;
+  /** > 0 while checking a term whose operands already had errors (see `quietIf`). */
+  private muted = 0;
   private pending: [Term, ZType][] = [];
 
   constructor(private readonly opts: CheckerOptions) {}
@@ -158,9 +176,23 @@ export class TypeChecker {
    * type of S), or ERROR.
    */
   checkDeclaredSet(t: Term, scope: Scope, sep: ':' | '∈' = ':'): ZType {
-    const el = this.declaredSet(t, scope, sep);
+    const before = this.errors;
+    const el = this.unifier.resolve(this.declaredSet(t, scope, sep));
     this.flush();
-    return this.unifier.resolve(el);
+    // `x : ∅`, `x : ℙ ∅`: no type (and for ∅ no value) for x
+    if (hasVar(el)) {
+      if (this.errors === before) {
+        const empty = t.kind === 'emptyset' || (t.kind === 'setDisplay' && t.elems.length === 0);
+        this.error(
+          t,
+          empty
+            ? `${qt(t)} is the empty set, so this variable could never have a value. After ${qs(sep)} comes a type like NAME or ℙ NAME.`
+            : `${qt(t)} does not tell the type (∅ could be a set of anything). After ${qs(sep)} comes a type like NAME or ℙ NAME.`,
+        );
+      }
+      return ERROR;
+    }
+    return el;
   }
 
   // ── internals ────────────────────────────────────────────────────────────
@@ -171,7 +203,8 @@ export class TypeChecker {
     this.pending = [];
   }
 
-  private error(at: Term | Span, message: string, kind: 'type' | 'scope' = 'type'): void {
+  private error(at: Term | Span, message: string, kind: 'type' | 'scope' | 'syntax' = 'type'): void {
+    if (this.muted) return;
     this.errors++;
     const sp = 'kind' in at ? at.span : at;
     this.opts.report?.({ section: this.opts.section, from: sp.from, to: sp.to, severity: 'error', kind, message });
@@ -225,6 +258,26 @@ export class TypeChecker {
     return ty;
   }
 
+  /** Check an operand in a value position; `bad` if errors were reported inside it. */
+  private operand(t: Term, scope: Scope): [ty: ZType, bad: boolean] {
+    const before = this.errors;
+    const ty = this.value(t, scope);
+    return [ty, this.errors > before || this.isErr(ty)];
+  }
+
+  /**
+   * Run the checks of a construct, without messages if one of its operands already had
+   * an error: a mismatch with an erroneous operand would only repeat that error.
+   */
+  private quietIf<T>(quiet: boolean, check: () => T): T {
+    if (quiet) this.muted++;
+    try {
+      return check();
+    } finally {
+      if (quiet) this.muted--;
+    }
+  }
+
   /** Check a term in a value position. */
   private value(t: Term, scope: Scope): ZType {
     const ty = this.infer(t, scope);
@@ -248,16 +301,16 @@ export class TypeChecker {
   }
 
   private declaredSet(t: Term, scope: Scope, sep: ':' | '∈'): ZType {
-    const ty = this.value(t, scope);
+    const [ty, bad] = this.operand(t, scope);
     const el = this.asSet(ty);
     if (!el) {
-      this.error(t, `After ${qs(sep)} comes a set (a type like NAME or ℙ NAME), but ${qt(t)} is ${this.show(ty)}.`);
+      if (!bad) this.error(t, `After ${qs(sep)} comes a set (a type like NAME or ℙ NAME), but ${qt(t)} is ${this.show(ty)}.`);
       return ERROR;
     }
     return el;
   }
 
-  /** Bind the variables of `x : S; y : T` (sequentially: T may mention x). */
+  /** Bind the variables of `x ∈ S; y ∈ T` (sequentially: T may mention x). */
   private bindDecls(decls: VarDecl[], scope: Scope): Scope {
     const inner = new Map(scope);
     const seen = new Set<string>();
@@ -293,9 +346,13 @@ export class TypeChecker {
       case 'setDisplay': {
         const el = this.unifier.fresh();
         let first: [Term, ZType] | null = null;
+        let anyBad = false;
         for (const e of t.elems) {
-          const ty = this.value(e, scope);
-          if (this.isErr(ty)) continue;
+          const [ty, bad] = this.operand(e, scope);
+          if (bad) {
+            anyBad = true;
+            continue;
+          }
           if (!this.unify(el, ty)) {
             const [ft, fty] = first ?? [e, ty];
             this.error(
@@ -304,7 +361,8 @@ export class TypeChecker {
             );
           } else if (!first) first = [e, ty];
         }
-        return power(el);
+        // with an erroneous element, the element type is not known (`{Dune, 1}` with Dune unknown)
+        return power(anyBad ? ERROR : el);
       }
       case 'setComp': {
         const inner = this.bindDecls(t.decls, scope);
@@ -317,10 +375,10 @@ export class TypeChecker {
         return product(t.elems.map((e) => this.value(e, scope)));
       case 'cross': {
         const parts = t.elems.map((e) => {
-          const ty = this.value(e, scope);
+          const [ty, bad] = this.operand(e, scope);
           const el = this.asSet(ty);
           if (!el) {
-            this.error(e, `‘×’ needs sets on both sides (like NAME × DATE), but ${qt(e)} is ${this.show(ty)}.`);
+            if (!bad) this.error(e, `‘×’ needs sets on both sides (like NAME × DATE), but ${qt(e)} is ${this.show(ty)}.`);
             return ERROR;
           }
           return el;
@@ -353,22 +411,26 @@ export class TypeChecker {
   }
 
   private inferApply(t: Extract<Term, { kind: 'apply' }>, scope: Scope): ZType {
-    const fty = this.value(t.fn, scope);
-    const aty = this.value(t.arg, scope);
+    const [fty, fBad] = this.operand(t.fn, scope);
+    const [aty, aBad] = this.operand(t.arg, scope);
     if (this.isErr(fty)) return ERROR;
     const rel = this.asRel(fty);
     if (!rel) {
-      this.error(t, `${qt(t.fn)} is ${this.show(fty)}, not a function, so it cannot be applied to ${qt(t.arg)}.`);
+      if (!fBad) this.error(t, `${qt(t.fn)} is ${this.show(fty)}, not a function, so it cannot be applied to ${qt(t.arg)}.`);
       return ERROR;
     }
-    if (!this.isErr(aty) && !this.unify(rel[0], aty)) {
+    if (!this.unify(rel[0], aty) && !fBad && !aBad) {
       this.error(t.arg, `${qt(t.fn)} expects ${this.show(rel[0])} as argument, but ${qt(t.arg)} is ${this.show(aty)}.`);
     }
     return rel[1];
   }
 
   private inferUnop(t: Extract<Term, { kind: 'unop' }>, scope: Scope): ZType {
-    const ty = this.value(t.arg, scope);
+    const [ty, bad] = this.operand(t.arg, scope);
+    return this.quietIf(bad, () => this.unop(t, ty));
+  }
+
+  private unop(t: Extract<Term, { kind: 'unop' }>, ty: ZType): ZType {
     if (t.op === 'neg') {
       if (!this.unify(ty, INT)) this.error(t, `‘-’ needs a number, but ${qt(t.arg)} is ${this.show(ty)}.`);
       return INT;
@@ -397,9 +459,13 @@ export class TypeChecker {
   }
 
   private inferBinop(t: Extract<Term, { kind: 'binop' }>, scope: Scope): ZType {
+    const [lt, lBad] = this.operand(t.left, scope);
+    const [rt, rBad] = this.operand(t.right, scope);
+    return this.quietIf(lBad || rBad, () => this.binop(t, lt, rt, lBad, rBad));
+  }
+
+  private binop(t: Extract<Term, { kind: 'binop' }>, lt: ZType, rt: ZType, lBad: boolean, rBad: boolean): ZType {
     const { op, left: l, right: r } = t;
-    const lt = this.value(l, scope);
-    const rt = this.value(r, scope);
     switch (op) {
       case '↦':
         return pair(lt, rt);
@@ -425,13 +491,14 @@ export class TypeChecker {
       case '∪':
       case '∩':
       case '∖':
+        // with an erroneous operand, the type comes from the other one
+        if (lBad || rBad) return lBad && rBad ? ERROR : lBad ? rt : lt;
         return this.setOp(t, lt, rt);
     }
   }
 
   private setOp(t: Extract<Term, { kind: 'binop' }>, lt: ZType, rt: ZType): ZType {
     const { op, left: l, right: r } = t;
-    if (this.isErr(lt) || this.isErr(rt)) return this.isErr(lt) ? rt : lt;
     const ls = this.asSet(lt);
     const rs = this.asSet(rt);
     if (!ls || !rs) {
@@ -448,10 +515,25 @@ export class TypeChecker {
   }
 
   private inferRel(t: Extract<Term, { kind: 'rel' }>, scope: Scope): void {
+    const l = t.left;
+    let rel = t;
+    // `a!=b` where there is no output a! (but there is an a): meant as a ≠ b
+    if (isBangEquals(t) && l.kind === 'name' && !scope.has(l.name) && scope.has(l.base)) {
+      this.error(
+        { from: l.span.to - 1, to: l.span.to + 1 },
+        `Write ‘≠’ (or ‘/=’) for “not equal”: ‘${l.base} ≠ ${printTerm(t.right)}’.`,
+        'syntax',
+      );
+      const base: Term = { kind: 'name', name: l.base, base: l.base, decoration: '', span: { from: l.span.from, to: l.span.to - 1 } };
+      rel = { ...t, op: '≠', left: base };
+    }
+    const [lt, lBad] = this.operand(rel.left, scope);
+    const [rt, rBad] = this.operand(rel.right, scope);
+    this.quietIf(lBad || rBad || rel !== t, () => this.rel(rel, lt, rt));
+  }
+
+  private rel(t: Extract<Term, { kind: 'rel' }>, lt: ZType, rt: ZType): void {
     const { op, left: l, right: r } = t;
-    const lt = this.value(l, scope);
-    const rt = this.value(r, scope);
-    // (`error` operands unify with everything, so no follow-up messages appear.)
     switch (op) {
       case '=':
       case '≠': {
@@ -512,4 +594,71 @@ export class TypeChecker {
         return;
     }
   }
+}
+
+// ── declarations that use variables ────────────────────────────────────────────
+
+/**
+ * A declaration whose set uses variables, like `t? : dom at` or `allergic : patients ↔ DRUG`,
+ * is valid Z, but the tutorial declares types only and states the rest as predicates.
+ * For such a declaration this returns a message that spells out the rewrite
+ * (`t? : TRAIN` and `t? ∈ dom at`), and the type of the declared variable. `scope` holds
+ * the given sets and the variables (kind 'var'). Returns null if the set uses no
+ * variables or the rewrite cannot be worked out (then the usual checks report it).
+ */
+export function typeOnlyRewrite(decl: VarDecl, scope: Scope): { message: string; type: ZType } | null {
+  const set = decl.type;
+  const isVar = (n: string) => scope.get(n)?.kind === 'var';
+  const varsIn = (t: Term) => [...freeVars(t)].filter(isVar);
+  const used = varsIn(set);
+  if (!used.length) return null;
+  const tc = new TypeChecker({ section: { schemaId: '', part: 'decls' } });
+  /** The type of the elements of set `t`, if `t` is a well-typed set. */
+  const elemOf = (t: Term): ZType | null => {
+    const ty = tc.checkExpression(t, scope);
+    return tc.errorCount === 0 && ty.k === 'power' && isGround(ty.elem) ? ty.elem : null;
+  };
+  /** A term for a type, e.g. `PATIENT ↔ DRUG`. */
+  const typeTerm = (ty: ZType): Term => parseTerm(typeToString(ty, { relations: true })).term!;
+  const rel = (op: '∈' | '⊆' | '=', left: Term, right: Term): Term => ({ kind: 'rel', op, left, right, span: right.span });
+
+  const el = elemOf(set);
+  if (!el) return null;
+  const x = decl.names[0];
+  const xTerm: Term = { kind: 'name', name: x.name, base: x.base, decoration: x.decoration, span: x.span };
+  let type: Term;
+  const preds: Term[] = [];
+  if (set.kind === 'binop' && (set.op === '↔' || set.op === '⇸' || set.op === '→')) {
+    // `allergic : patients ↔ DRUG`: the type PATIENT ↔ DRUG, plus dom/ran conditions
+    const [l, r] = [set.left, set.right];
+    const lv = varsIn(l).length > 0;
+    const rv = varsIn(r).length > 0;
+    const le = lv ? elemOf(l) : null;
+    const re = rv ? elemOf(r) : null;
+    if ((lv && !le) || (rv && !re)) return null;
+    // a total function on a variable set: a partial function whose domain is that set
+    const op = set.op === '→' && lv ? '⇸' : set.op;
+    type = { kind: 'binop', op, left: le ? typeTerm(le) : l, right: re ? typeTerm(re) : r, span: set.span };
+    const dom: Term = { kind: 'unop', op: 'dom', arg: xTerm, span: x.span };
+    const ran: Term = { kind: 'unop', op: 'ran', arg: xTerm, span: x.span };
+    if (lv) preds.push(rel(set.op === '→' ? '=' : '⊆', dom, l));
+    if (rv) preds.push(rel('⊆', ran, r));
+  } else if (set.kind === 'unop' && set.op === 'ℙ' && elemOf(set.arg)) {
+    // `s : ℙ patients`: s : ℙ PATIENT and s ⊆ patients
+    type = typeTerm(el);
+    preds.push(rel('⊆', xTerm, set.arg));
+  } else {
+    // `t? : dom at`: t? : TRAIN and t? ∈ dom at
+    type = typeTerm(el);
+    preds.push(rel('∈', xTerm, set));
+  }
+  const names = used.map(qs);
+  const which =
+    names.length === 1 ? `${names[0]} is a variable, not a type.` : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are variables, not types.`;
+  const shown = preds.map((p) => qs(printTerm(p)));
+  const add = shown.length === 1 ? `${shown[0]} as a predicate` : `${shown.join(' and ')} as predicates`;
+  return {
+    message: `${which} Declare ${x.name} with a type, ${qs(`${x.name} : ${printTerm(type)}`)}, and add ${add}.`,
+    type: el,
+  };
 }

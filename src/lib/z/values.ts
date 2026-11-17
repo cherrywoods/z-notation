@@ -8,6 +8,8 @@
 //            they support exact membership tests and are enumerated only on demand
 //            (see eval.ts).
 
+import { spend } from './gen/clock';
+
 export interface AtomValue {
   k: 'atom';
   /** Given set the atom belongs to, e.g. 'BOOK'. */
@@ -46,6 +48,8 @@ export type LazyDesc =
   | { kind: 'power'; base: SetLike } // ℙ S
   | { kind: 'rel' | 'pfun' | 'tfun'; from: SetLike; to: SetLike } // X ↔ Y, X ⇸ Y, X → Y
   | { kind: 'cross'; sets: SetLike[] } // X × Y (large)
+  /** A ∪ B, A ∩ B, A ∖ B of sets that cannot be listed (e.g. (PATIENT × DRUG) ∖ allergic). */
+  | { kind: 'setop'; op: '∪' | '∩' | '∖'; left: SetLike; right: SetLike }
   /** A given set that is infinite in principle; `sample` are its example elements. */
   | { kind: 'given'; set: string; sample: SetValue }
   /**
@@ -94,6 +98,7 @@ export function mkSet(elems: Iterable<Value>): SetValue {
     const key = valueKey(e);
     if (!index.has(key)) index.set(key, e);
   }
+  spend(1 + index.size); // (the example searches build a lot of sets)
   const sorted = [...index.values()].sort(compareValues);
   return { k: 'set', elems: sorted, index };
 }
@@ -152,6 +157,8 @@ function lazyKey(d: LazyDesc): string {
       return `${d.kind}(${valueKey(d.from)},${valueKey(d.to)})`;
     case 'cross':
       return `cross(${d.sets.map(valueKey).join(',')})`;
+    case 'setop':
+      return `${d.op}(${valueKey(d.left)},${valueKey(d.right)})`;
     case 'given':
       return `given(${d.set})`;
     case 'approx':
@@ -259,6 +266,8 @@ function printLazy(d: LazyDesc, min: number): string {
     }
     case 'cross':
       return wrap(2, d.sets.map((s) => sub(s, 3)).join(' × '));
+    case 'setop':
+      return wrap(2, `${sub(d.left, 3)} ${d.op} ${sub(d.right, 3)}`);
     case 'given':
       return d.set;
     case 'approx': {

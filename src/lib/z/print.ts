@@ -102,11 +102,9 @@ function raw(t: Term): string {
     case 'setDisplay':
       return t.elems.length === 0 ? '∅' : `{${t.elems.map((e) => pr(e, P.iff)).join(', ')}}`;
     case 'setComp': {
-      // `{ x ∈ S }` alone would read as a set display, so print it as `{ x : S }`.
-      const decls = t.pred || t.expr ? t.decls : t.decls.map((d) => ({ ...d, sep: ':' as const }));
-      let s = `{ ${decls.map(printVarDecl).join('; ')}`;
+      let s = `{ ${t.decls.map(printBinding).join('; ')}`;
       if (t.pred) s += ` | ${pr(t.pred, P.iff)}`;
-      if (t.expr) s += ` • ${pr(t.expr, P.iff)}`;
+      if (t.expr) s += ` . ${pr(t.expr, P.iff)}`;
       return s + ' }';
     }
     case 'tuple':
@@ -153,24 +151,30 @@ function raw(t: Term): string {
       return `${pr(t.left, p)} ${t.op} ${pr(t.right, p + 1)}`;
     }
     case 'quant': {
-      let s = `${t.q} ${t.decls.map(printVarDecl).join('; ')}`;
+      let s = `${t.q} ${t.decls.map(printBinding).join('; ')}`;
       if (t.pred) s += ` | ${pr(t.pred, P.iff)}`;
-      return `${s} • ${pr(t.body, 0)}`;
+      return `${s} . ${pr(t.body, 0)}`;
     }
   }
   return '?';
 }
 
-/** `x, y : T` (or `x ∈ T` if it was written that way). */
-export function printVarDecl(d: VarDecl): string {
-  return `${d.names.map((n) => n.name).join(', ')} ${d.sep ?? ':'} ${pr(d.type, P.arrow)}`;
+/**
+ * A declaration: `x : T` in a schema's declaration part, `x, y ∈ S` (the tutorial's
+ * notation) in quantifiers and set comprehensions.
+ */
+export function printVarDecl(d: VarDecl, sep: ':' | '∈' = ':'): string {
+  return `${d.names.map((n) => n.name).join(', ')} ${sep} ${pr(d.type, P.arrow)}`;
 }
+
+/** The declarations of ∀ / ∃ / { … } are always printed with ∈. */
+const printBinding = (d: VarDecl) => printVarDecl(d, '∈');
 
 /** Print one line of a declaration part. */
 export function printDecl(d: Decl): string {
   switch (d.kind) {
     case 'var':
-      return printVarDecl(d);
+      return printVarDecl(d, ':');
     case 'delta':
       return `Δ${d.schema}`;
     case 'xi':
@@ -304,7 +308,7 @@ export function declEquals(a: Decl, b: Decl): boolean {
 /**
  * Free identifiers of a term (decorated names like 'onLoan′', 'book?'). Given-set
  * names count as free identifiers too. Declarations are scoped sequentially:
- * in `∀ p : S; d : dom (rx p) • …` the second type may mention `p`.
+ * in `∀ p ∈ S; d ∈ dom (rx p) . …` the second type may mention `p`.
  */
 export function freeVars(t: Term): Set<string> {
   const out = new Set<string>();

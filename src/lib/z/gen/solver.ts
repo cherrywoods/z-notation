@@ -1,7 +1,7 @@
 // Constraint solver for examples: find values for unknown variables such that all
 // (hard) predicates hold. A mix of
 //   * definitions   `v = e` computes v from e (e.g. onLoan = dom borrower),
-//   * guided choices for sets (`dom f ⊆ S`, `x ∈ s`, `∀ x : s • P`, …) and scalars
+//   * guided choices for sets (`dom f ⊆ S`, `x ∈ s`, `∀ x ∈ s . P`, …) and scalars
 //                   (the candidate that satisfies most predicates),
 //   * random generation of the remaining variables (small values), and
 //   * local search on the graded distance of violated predicates (see dist.ts),
@@ -11,9 +11,10 @@
 import type { Term } from '../ast';
 import { evalPred, evalTerm, memberOf, memberOfDeclared, type Universe } from '../eval';
 import { freeVars } from '../print';
-import { isSetLike, valueEquals, valueKey, type SetLike, type Value } from '../values';
+import { int, isSetLike, valueEquals, valueKey, type SetLike, type Value } from '../values';
+import { now } from './clock';
 import { dist, hasBinder } from './dist';
-import { allowedElements, emptySpec, enumDom, genSet, isScalarDom, isSetDom, mutateDom, repairSet, sampleDom, type Dom, type SetDom, type SetSpec } from './dom';
+import { allowedElements, candidatesNear, completeEnum, emptySpec, enumDom, genSet, isScalarDom, isSetDom, mutateDom, repairSet, sampleDom, type Dom, type SetSpec } from './dom';
 import type { Rng } from './rng';
 
 export type Env = Map<string, Value>;
@@ -40,6 +41,11 @@ export interface Con {
   hard: boolean;
   weight: number;
   tag?: unknown;
+  /**
+   * A constraint given by a test instead of `term` (which is then ignored): its distance
+   * (0 = satisfied) in an assignment, and the names it reads.
+   */
+  test?: { dist: (env: Env) => number; reads: string[] };
 }
 
 export interface Problem {
@@ -56,6 +62,8 @@ export interface SolveResult {
   violated: Con[];
   /** Unknowns whose value is not in their declared set. */
   badDecls: string[];
+  /** The search stopped at its deadline (not after its steps): a failure says less. */
+  timedOut?: boolean;
 }
 
 export interface SearchOpts {
@@ -66,7 +74,7 @@ export interface SearchOpts {
   restartAfter?: number;
 }
 
-export const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+export { deterministically, now } from './clock';
 
 const EPS = 1e-9;
 const P_WORSE = 0.04;
@@ -132,7 +140,7 @@ export function buildPlan(p: Problem, differs?: { name: string; value: Value }):
   // definitions v = e (greedy, acyclic, preferring after-state/outputs as targets)
   const cands: { target: number; expr: Term; deps: number[]; ci: number }[] = [];
   p.cons.forEach((c, ci) => {
-    if (!c.hard) return;
+    if (!c.hard || c.test) return;
     for (const cj of conjuncts(c.term)) {
       if (cj.kind !== 'rel' || cj.op !== '=') continue;
       for (const [side, other] of [
@@ -219,8 +227,10 @@ export function buildPlan(p: Problem, differs?: { name: string; value: Value }):
   const cons: ICon[] = [];
   const rootsFor = (vars: number[]) => [...new Set(vars.flatMap((v) => rootsOf[v]))];
   for (const c of p.cons) {
-    const vars = unknownDeps(c.term);
-    cons.push({ kind: 'pred', hard: c.hard, weight: c.weight, vars, roots: rootsFor(vars), src: c, eval: (env) => dist(c.term, env, u) });
+    const vars = c.test ? depsOf(c.test.reads) : unknownDeps(c.term);
+    const test = c.test;
+    const evalC = test ? (env: Env) => test.dist(env) : (env: Env) => dist(c.term, env, u);
+    cons.push({ kind: 'pred', hard: c.hard, weight: c.weight, vars, roots: rootsFor(vars), src: c, eval: evalC });
   }
   p.unknowns.forEach((x, v) => {
     const declared = x.declared;
@@ -292,7 +302,7 @@ export function buildPlan(p: Problem, differs?: { name: string; value: Value }):
     } else {
       const placedBefore = (deps: number[]) => deps.every((x) => x !== r && pos[x] < pos[r]);
       for (const c of p.cons) {
-        if (!c.hard) continue;
+        if (!c.hard || c.test) continue;
         for (const cj of conjuncts(c.term)) setGuides[r].push(...guidesFor(cj, names[r], depsOf, placedBefore, u));
       }
     }
@@ -350,6 +360,7 @@ function guidesFor(
         const y = pj(x);
         return y !== undefined && memberOf(y, s, u) !== negate;
       });
+      if (pj === FIRST) spec.domFilters.push((y) => memberOf(y, s, u) !== negate);
     },
   });
   const requireAll = (e: Term, toDom: boolean): SetGuide => ({
@@ -417,9 +428,7 @@ function guidesFor(
       out.push({
         deps,
         apply(env, spec) {
-          spec.filters.push((e) => {
-            const y = pj(e);
-            if (y === undefined) return false;
+          const test = (y: Value) => {
             const had = env.has(x);
             const old = env.get(x);
             env.set(x, y);
@@ -431,7 +440,12 @@ function guidesFor(
               if (had) env.set(x, old as Value);
               else env.delete(x);
             }
+          };
+          spec.filters.push((e) => {
+            const y = pj(e);
+            return y !== undefined && test(y);
           });
+          if (pj === FIRST) spec.domFilters.push(test);
         },
       });
     }
@@ -466,6 +480,8 @@ export class Search {
   private stamp = 0;
   /** Deadline of the current run (also checked inside expensive moves). */
   private deadline = Infinity;
+  /** Distances of the constraints that mention no unknown (they never change). */
+  private readonly fixedD = new Map<number, number>();
 
   constructor(
     readonly pl: Plan,
@@ -485,11 +501,15 @@ export class Search {
     let stall = 0;
     let softSteps = 0;
     const restartAfter = opts.restartAfter ?? 120;
+    let timedOut = false;
     for (let step = 0; step < opts.maxSteps; step++) {
       if (this.hardCount === 0) {
         if (this.softTotal() <= EPS || ++softSteps > (opts.softSteps ?? 40)) break;
       }
-      if (now() > opts.deadline) break;
+      if (now() > opts.deadline) {
+        timedOut = true;
+        break;
+      }
       const r = this.chooseRoot();
       if (r < 0) break;
       this.move(r);
@@ -504,15 +524,20 @@ export class Search {
       }
     }
     this.restore(best);
-    return this.result();
+    const res = this.result();
+    if (timedOut && !res.ok) res.timedOut = true;
+    return res;
   }
 
-  /** Try all combinations of candidate values for some scalar roots (the others as in `start`). */
-  exhaust(roots: number[], start: ReadonlyMap<string, Value>, deadline: number): SolveResult | null {
+  /**
+   * Try all combinations of the candidate values for some scalar roots (the others as in
+   * `start`): a solution, 'none' if no combination works, 'timeout' if cut short.
+   */
+  exhaust(roots: number[], cands: Value[][], start: ReadonlyMap<string, Value>, deadline: number): SolveResult | 'none' | 'timeout' {
     this.deadline = deadline;
     this.load(start);
-    const cands = roots.map((r) => enumDom(this.pl.p.unknowns[r].dom) ?? []);
     let count = 0;
+    let late = false;
     const rec = (i: number): SolveResult | null => {
       if (i === roots.length) {
         if (this.hardCount !== 0) return null;
@@ -524,11 +549,14 @@ export class Search {
         const r = rec(i + 1);
         this.undo(undo);
         if (r) return r;
-        if ((++count & 31) === 0 && now() > deadline) return null;
+        if (late || ((++count & 15) === 0 && now() > deadline)) {
+          late = true;
+          return null;
+        }
       }
       return null;
     };
-    return rec(0);
+    return rec(0) ?? (late ? 'timeout' : 'none');
   }
 
   /**
@@ -550,8 +578,21 @@ export class Search {
       const allowed = allowedElements(dom, this.rng, spec);
       if (!allowed) return false;
       const req = new Set(spec.required.map(valueKey));
-      return allowed.every((e) => req.has(valueKey(e)));
+      // a function cannot have a second pair for an x that a required pair maps already
+      const fn = dom.k === 'rel' && dom.fn !== 'rel';
+      const reqX = new Set(spec.required.flatMap((p) => (p.k === 'tuple' && p.elems.length === 2 ? [valueKey(p.elems[0])] : [])));
+      return allowed.every((e) => req.has(valueKey(e)) || (fn && e.k === 'tuple' && reqX.has(valueKey(e.elems[0]))));
     });
+  }
+
+  /**
+   * Do the constraints on these roots involve no other root? Then the roots can be
+   * changed alone (the other roots keep their values), and trying all their values is
+   * a complete search.
+   */
+  closed(roots: number[]): boolean {
+    const R = new Set(roots);
+    return this.pl.cons.every((c) => !c.hard || !c.roots.some((r) => R.has(r)) || c.roots.every((r) => R.has(r)));
   }
 
   /** Current assignment as a result (verified with the exact evaluator). */
@@ -559,10 +600,10 @@ export class Search {
     const violated: Con[] = [];
     const badDecls: string[] = [];
     let ok = true;
-    this.pl.cons.forEach((c) => {
-      const d = c.eval(this.env);
+    this.pl.cons.forEach((c, i) => {
+      const d = this.evalCon(i);
       let bad = d > 0;
-      if (c.kind === 'pred' && c.src && !bad && !hasBinder(c.src.term)) {
+      if (c.kind === 'pred' && c.src && !c.src.test && !bad && !hasBinder(c.src.term)) {
         // double-check with the evaluator itself (cheap without quantifiers)
         try {
           bad = !evalPred(c.src.term, this.env, this.pl.p.u);
@@ -602,7 +643,8 @@ export class Search {
         continue;
       }
       if (isScalarDom(U.dom)) env.set(U.name, this.bestScalar(v));
-      else env.set(U.name, genSet(U.dom as SetDom, rng, this.specFor(v), 0));
+      else if (isSetDom(U.dom)) env.set(U.name, genSet(U.dom, rng, this.specFor(v), 0));
+      else env.set(U.name, sampleDom(U.dom, rng)); // a tuple with a set in it, e.g. BOOK × ℙ MEMBER
     }
     this.recomputeAll();
   }
@@ -617,11 +659,19 @@ export class Search {
     this.hardCount = 0;
     this.obj = 0;
     this.pl.cons.forEach((c, i) => {
-      const d = c.eval(this.env);
+      const d = this.evalCon(i);
       this.dist[i] = d;
       if (c.hard && d > 0) this.hardCount++;
       this.obj += c.weight * d;
     });
+  }
+
+  private evalCon(i: number): number {
+    const c = this.pl.cons[i];
+    if (c.vars.length) return c.eval(this.env);
+    let d = this.fixedD.get(i);
+    if (d === undefined) this.fixedD.set(i, (d = c.eval(this.env)));
+    return d;
   }
 
   private snapshot(): Snapshot {
@@ -678,7 +728,7 @@ export class Search {
     const cur = env.get(U.name) as Value;
     let cand: Value;
     if (isScalarDom(U.dom)) {
-      let cands = (enumDom(U.dom) ?? []).filter((c) => !valueEquals(c, cur));
+      let cands = this.scalarCands(U.dom).filter((c) => !valueEquals(c, cur));
       if (!cands.length) return;
       if (cands.length > 16) cands = rng.sample(cands, 16);
       if (rng.chance(0.5)) {
@@ -774,7 +824,8 @@ export class Search {
   private bestScalar(v: number): Value {
     const { pl, env, rng } = this;
     const U = pl.p.unknowns[v];
-    let cands = enumDom(U.dom) ?? [sampleDom(U.dom, rng)];
+    let cands = this.scalarCands(U.dom);
+    if (!cands.length) cands = [sampleDom(U.dom, rng)];
     if (cands.length > 24) cands = rng.sample(cands, 24);
     const guides = pl.scalarGuides[v];
     if (!guides.length) return rng.pick(cands);
@@ -794,6 +845,24 @@ export class Search {
     if (had) env.set(U.name, had);
     else env.delete(U.name);
     return rng.pick(bestVals);
+  }
+
+  /**
+   * Candidates of a scalar domain; for numbers also the numbers in the current values
+   * (b! = balance(a?) with balance(a?) = 300 needs 300, not one of the usual small ones).
+   */
+  private scalarCands(d: Dom): Value[] {
+    const base = enumDom(d) ?? [];
+    if (d.k !== 'int') return base;
+    const have = new Set(d.cands);
+    const extra = new Set<number>();
+    const walk = (v: Value): void => {
+      if (v.k === 'int') {
+        if (!have.has(v.v) && v.v >= d.lo && v.v <= d.hi) extra.add(v.v);
+      } else if ((v.k === 'tuple' || v.k === 'set') && extra.size < 40) v.elems.forEach(walk);
+    };
+    for (const v of this.env.values()) walk(v);
+    return extra.size ? [...base, ...[...extra].map(int)] : base;
   }
 
   private specFor(v: number, guides = this.pl.setGuides[v]): SetSpec {
@@ -816,29 +885,42 @@ export function solve(p: Problem, rng: Rng, opts: SearchOpts): SolveResult {
 }
 
 /**
- * Another solution that differs from `sol` in variable `x` (all other known values
- * fixed), or null if none was found. Only a verified solution counts.
+ * Is `x` determined by the problem, given the solution `sol` (all other known values
+ * fixed)? Another solution's value for x (so: no), 'unique' when that is established
+ * (x is computed from known values, its set is pinned down by the predicates, or all
+ * values of a small finite domain were tried), or 'unknown'.
  */
-export function findWitness(p: Problem, x: string, sol: ReadonlyMap<string, Value>, rng: Rng, deadline: number): Value | null {
+export function findWitness(p: Problem, x: string, sol: ReadonlyMap<string, Value>, rng: Rng, deadline: number): Value | 'unique' | 'unknown' {
   const cur = sol.get(x);
-  if (!cur) return null;
+  if (!cur) return 'unknown';
   const pl = buildPlan(p, { name: x, value: cur });
   const xi = pl.idx.get(x);
-  if (xi === undefined || !pl.rootsOf[xi].length) return null;
-  const search = new Search(pl, rng);
+  if (xi === undefined) return 'unknown';
   const roots = pl.rootsOf[xi];
-  if (search.allForced(roots, sol)) return null;
-  let size = 1;
-  for (const r of roots) size *= isScalarDom(p.unknowns[r].dom) ? (enumDom(p.unknowns[r].dom)?.length ?? Infinity) : Infinity;
-  // few combinations: try them all (other roots as in sol); otherwise, or if other
-  // roots would have to change too, local search
-  let res = size <= 500 ? search.exhaust(roots, sol, deadline) : null;
-  if (!res && (size > 500 || pl.roots.length > roots.length) && now() < deadline) {
-    res = search.run({ maxSteps: 300, deadline, softSteps: 0, restartAfter: 50 }, sol);
+  if (!roots.length) return 'unique';
+  const search = new Search(pl, rng);
+  if (search.allForced(roots, sol)) return 'unique';
+  if (now() > deadline) return 'unknown';
+  const other = (res: SolveResult | null): Value | null => {
+    const val = res?.ok ? res.env.get(x) : undefined;
+    return val && !valueEquals(val, cur) ? val : null;
+  };
+  // scalar roots: try the candidates (with numbers next to the current ones); if they
+  // are the whole (small, finite) domain and no other root is involved, that is a proof
+  if (roots.every((r) => isScalarDom(p.unknowns[r].dom))) {
+    const complete = roots.map((r) => completeEnum(p.unknowns[r].dom));
+    const cands = roots.map((r, i) => complete[i] ?? candidatesNear(p.unknowns[r].dom, sol.get(pl.names[r])));
+    const size = cands.reduce((n, c) => n * c.length, 1);
+    if (size <= 500) {
+      const r = search.exhaust(roots, cands, sol, deadline);
+      if (typeof r !== 'string') {
+        const w = other(r);
+        if (w) return w;
+      } else if (r === 'none' && complete.every(Boolean) && search.closed(roots)) return 'unique';
+    }
   }
-  if (!res || !res.ok) return null;
-  const val = res.env.get(x);
-  return val && !valueEquals(val, cur) ? val : null;
+  if (now() > deadline) return 'unknown';
+  return other(search.run({ maxSteps: 200, deadline, softSteps: 0, restartAfter: 40 }, sol)) ?? 'unknown';
 }
 
 /** Is `x` computed from the known values by definitions alone (so it is determined)? */

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LIBRARY, LOANS_OF } from './testing/library';
 import type { SchemaDoc, SchemaRole, SpecDoc } from '../spec/model';
 import { createSpec } from '../spec/topics';
@@ -6,10 +6,17 @@ import { exampleInit, exampleOperation, exampleState, exampleTypes, universeFor 
 import { analyseSpec } from './index';
 import type { OpExample, ShownVar, StateExample } from './results';
 import { evalPred, makeUniverse } from './eval';
+import { deterministically, now, useWorkClock } from './gen/clock';
 import { dist } from './gen/dist';
 import { makeRng } from './gen/rng';
 import { parseTerm } from './parser';
-import { mkSet, printValue, type Value } from './values';
+import { printTerm } from './print';
+import { EMPTY, atom, mkSet, printValue, tuple, type Value } from './values';
+
+// Example searches count work instead of milliseconds here (gen/clock), so the results
+// do not depend on the machine's speed or load.
+beforeAll(() => useWorkClock(true));
+afterAll(() => useWorkClock(false));
 
 // ── fixtures ───────────────────────────────────────────────────────────────────
 
@@ -114,11 +121,16 @@ function okOp(ex: OpExample): Extract<OpExample, { ok: true }> {
   return ex;
 }
 
-/** Run `f`, return its result and the time it took (ms). */
+/**
+ * Run `f` on the work clock (gen/clock: the budgets count work, not milliseconds, so
+ * the result is the same under any load); its result and the work time it took (ms).
+ */
 function timed<T>(f: () => T): [T, number] {
-  const t = performance.now();
-  const r = f();
-  return [r, performance.now() - t];
+  return deterministically(() => {
+    const t = now();
+    const r = f();
+    return [r, now() - t];
+  });
 }
 
 // ── universe ───────────────────────────────────────────────────────────────────
@@ -126,21 +138,23 @@ function timed<T>(f: () => T): [T, number] {
 describe('universe', () => {
   const an = analyseSpec(LIBRARY);
 
-  it('takes 4–6 values of each pool, in pool order', () => {
+  it('uses the whole pool, in pool order, the same for every seed', () => {
     for (const seed of SEEDS) {
       const u = universeFor(LIBRARY, an, seed);
-      for (const set of ['BOOK', 'MEMBER']) {
-        const names = u.carriers[set].map(printValue);
-        expect(names.length).toBeGreaterThanOrEqual(4);
-        expect(names.length).toBeLessThanOrEqual(6);
-        const pool = LIBRARY.pools[set];
-        const idx = names.map((n) => pool.indexOf(n));
-        expect(idx.every((i) => i >= 0)).toBe(true);
-        expect([...idx].sort((a, b) => a - b)).toEqual(idx);
-      }
+      for (const set of ['BOOK', 'MEMBER']) expect(u.carriers[set].map(printValue)).toEqual(LIBRARY.pools[set]);
     }
-    const variants = new Set(SEEDS.map((s) => universeFor(LIBRARY, an, s).carriers.BOOK.map(printValue).join()));
-    expect(variants.size).toBeGreaterThan(5);
+    for (const t of TEMPLATES) {
+      const spec = studentSpec(t);
+      const an2 = analyseSpec(spec);
+      const carriers = (seed: number) => JSON.stringify(universeFor(spec, an2, seed).carriers);
+      expect(new Set(SEEDS.map(carriers)).size, t.id).toBe(1);
+    }
+  });
+
+  it('changes the carriers only when the pools change', () => {
+    const spec = lib((s) => (s.pools.BOOK = ['Dune', 'Emma', 'Walden']));
+    expect(universeFor(spec, analyseSpec(spec), 3).carriers.BOOK.map(printValue)).toEqual(['Dune', 'Emma', 'Walden']);
+    expect(exampleTypes(spec, analyseSpec(spec), 1)).toEqual(exampleTypes(spec, analyseSpec(spec), 99));
   });
 
   it('names values of sets without a pool after the set', () => {
@@ -256,8 +270,21 @@ describe('Library', () => {
     expect(ex.failed?.map((c) => c.text)).toEqual(['book? ∈ onLoan']);
   });
 
-  it('flags borrower′ as free when the effect is missing', () => {
+  it('keeps variables the operation does not mention unchanged (frame convention)', () => {
     const spec = lib((s) => (s.operations[1].preds = 'book? ∉ onLoan'));
+    const an2 = analyseSpec(spec);
+    expect(an2.byId['op-lend'].preds.filter((p) => p.origin === 'frame').map((p) => printTerm(p.term))).toEqual([
+      'onLoan′ = onLoan',
+      'borrower′ = borrower',
+    ]);
+    for (const seed of SEEDS.slice(0, 5)) {
+      const ex = okOp(exampleOperation(spec, an2, 'op-lend', seed, 'applicable'));
+      expect(ex.after.map((v) => v.status)).toEqual(['unchanged', 'unchanged']);
+    }
+  });
+
+  it('flags borrower′ as free when the effect is incomplete', () => {
+    const spec = lib((s) => (s.operations[1].preds = 'book? ∉ onLoan\nbook? ∈ dom borrower′'));
     const an2 = analyseSpec(spec);
     for (const seed of SEEDS.slice(0, 10)) {
       const ex = okOp(exampleOperation(spec, an2, 'op-lend', seed, 'applicable'));
@@ -304,6 +331,39 @@ describe('Library', () => {
       }
     }
     expect(free).toBeGreaterThan(10);
+  });
+
+  it('claims computed only when the predicates fix the value', () => {
+    const counter = (stateDecls: string, opPreds: string, opDecls = 'ΔCounter'): SpecDoc => ({
+      topicId: 't',
+      title: 'T',
+      given: '[]',
+      pools: {},
+      infinite: [],
+      state: { id: 'state', role: 'state', name: 'Counter', decls: stateDecls, preds: '' },
+      init: null,
+      operations: [{ id: 'op', role: 'operation', name: 'Op', decls: opDecls, preds: opPreds }],
+    });
+    const statusIn = (spec: SpecDoc, name: string, seed: number) => {
+      const ex = okOp(exampleOperation(spec, analyseSpec(spec), 'op', seed, 'applicable'));
+      return byName([...ex.after, ...ex.outputs], name);
+    };
+    for (const seed of SEEDS.slice(0, 5)) {
+      // only a few small numbers are candidates, but x! = 21 is not the only answer
+      const x = statusIn(counter('c : ℕ', 'x! > 20', 'ΞCounter\nx! : ℕ'), 'x!', seed);
+      expect(x).toMatchObject({ text: '21', status: 'free', alternative: '22' });
+      const c = statusIn(counter('c : ℕ', 'c = 9\nc′ > c'), 'c′', seed);
+      expect(c).toMatchObject({ text: '10', status: 'free', alternative: '11' });
+      // all of 0 .. 10 tried: a proof
+      const d = statusIn(counter('c : 0 .. 10', 'c′ > 9'), 'c′', seed);
+      expect(d.text).toBe('10');
+      expect(['computed', 'unchanged']).toContain(d.status);
+      // c′ = 10 is the only value (c′ ≤ 10 by the invariant), but only small numbers were
+      // tried: chosen, not computed
+      const spec = counter('c : ℕ', 'c′ > 9');
+      spec.state.preds = 'c ≤ 10';
+      expect(statusIn(spec, 'c′', seed)).toMatchObject({ text: '10', status: 'chosen' });
+    }
   });
 
   it('flags an unconstrained output as free', () => {
@@ -475,6 +535,20 @@ describe('robustness', () => {
     }
   });
 
+  it('generates tuples that contain sets (BOOK × ℙ MEMBER)', () => {
+    const spec = lib((s) => {
+      s.state.decls = 'onLoan : ℙ BOOK\nborrower : BOOK ⇸ MEMBER\nx : BOOK × ℙ MEMBER';
+      s.operations[1].decls = 'ΔLibrary\nbook? : BOOK\nmember? : MEMBER\ne? : BOOK × ℙ MEMBER';
+    });
+    const an = analyseSpec(spec);
+    for (const seed of SEEDS.slice(0, 5)) {
+      const x = byName(okState(exampleState(spec, an, seed)).vars, 'x').value;
+      expect(x.k === 'tuple' && x.elems[0].k === 'atom' && x.elems[1].k === 'set').toBe(true);
+      const e = byName(okOp(exampleOperation(spec, an, 'op-lend', seed, 'applicable')).inputs, 'e?').value;
+      expect(e.k === 'tuple' && e.elems[1].k === 'set').toBe(true);
+    }
+  });
+
   it('ignores fixed data that does not fit the declaration', () => {
     const spec = lib((s) => (s.fixed = { borrower: '{Dune ↦ Ada, Dune ↦ Ben}', onLoan: '{Nobody}' }));
     const ex = okState(exampleState(spec, analyseSpec(spec), 1));
@@ -483,6 +557,96 @@ describe('robustness', () => {
 });
 
 // ── internals: graded distance and value generation ────────────────────────────
+
+describe('operations from a given state', () => {
+  const an = analyseSpec(LIBRARY);
+  const u = universeFor(LIBRARY, an, 1);
+  const book = (n: string) => u.carriers.BOOK.find((b) => printValue(b) === n)!;
+  const member = (n: string) => u.carriers.MEMBER.find((m) => printValue(m) === n)!;
+  const loans = (pairs: [string, string][]) => ({
+    onLoan: mkSet(pairs.map(([b]) => book(b))),
+    borrower: mkSet(pairs.map(([b, m]) => tuple([book(b), member(m)]))),
+  });
+  const texts = (vs: ShownVar[]) => Object.fromEntries(vs.map((v) => [v.name, v.text]));
+
+  it('keeps the state of the state example and varies the rest', () => {
+    const st = okState(exampleState(LIBRARY, an, 3));
+    const before = Object.fromEntries(st.vars.map((v) => [v.name, v.value]));
+    const inputs = new Set<string>();
+    for (const seed of SEEDS) {
+      const ex = okOp(exampleOperation(LIBRARY, an, 'op-lend', seed, 'applicable', { before }));
+      expect(texts(ex.before)).toEqual(texts(st.vars));
+      expect(ex.freshBefore).toBeUndefined();
+      expect(ex.checks.every((c) => c.result === true)).toBe(true);
+      inputs.add(JSON.stringify(texts(ex.inputs)));
+    }
+    expect(inputs.size).toBeGreaterThan(3);
+  });
+
+  it('finds a blocked case in the given state', () => {
+    const before = loans([
+      ['Dune', 'Ada'],
+      ['Emma', 'Ben'],
+    ]);
+    for (const seed of SEEDS.slice(0, 8)) {
+      const ex = okOp(exampleOperation(LIBRARY, an, 'op-lend', seed, 'blocked', { before }));
+      expect(ex.status).toBe('blocked');
+      expect(texts(ex.before)).toEqual({ onLoan: '{Dune, Emma}', borrower: '{Dune ↦ Ada, Emma ↦ Ben}' });
+      expect(['Dune', 'Emma']).toContain(texts(ex.inputs)['book?']); // lending a book that is on loan
+      expect(ex.failed?.map((c) => c.text)).toEqual(['book? ∉ onLoan']);
+    }
+  });
+
+  it('says when no input works in the given state', () => {
+    const all = loans(LIBRARY.pools.BOOK.map((b) => [b, 'Ada'] as [string, string]));
+    const lend = exampleOperation(LIBRARY, an, 'op-lend', 1, 'applicable', { before: all });
+    expect(lend).toMatchObject({
+      ok: false,
+      reason: 'no-input-for-state',
+      message: 'No input meets the precondition in this example state — try a new example state.',
+    });
+    expect(lend.ok === false && lend.before?.map((v) => v.text)).toEqual([printValue(all.onLoan), printValue(all.borrower)]);
+    // nothing is on loan: FindBorrower has no input, and Lend is never blocked
+    const none = loans([]);
+    expect(exampleOperation(LIBRARY, an, 'op-find', 1, 'applicable', { before: none })).toMatchObject({ ok: false, reason: 'no-input-for-state' });
+    expect(exampleOperation(LIBRARY, an, 'op-lend', 1, 'blocked', { before: none })).toMatchObject({
+      ok: false,
+      reason: 'no-blocked',
+      message: 'No input is blocked in this example state — try a new example state.',
+    });
+  });
+
+  it('generates variables the given state lacks, keeping the others', () => {
+    const { onLoan } = loans([
+      ['Dune', 'Ada'],
+      ['Hamlet', 'Ben'],
+    ]);
+    for (const seed of SEEDS.slice(0, 5)) {
+      const ex = okOp(exampleOperation(LIBRARY, an, 'op-lend', seed, 'applicable', { before: { onLoan } }));
+      expect(texts(ex.before).onLoan).toBe('{Dune, Hamlet}');
+      expect(printValue(dom(byName(ex.before, 'borrower').value))).toBe('{Dune, Hamlet}'); // fits the invariant
+      expect(ex.checks.every((c) => c.result === true)).toBe(true);
+    }
+    // a value that no longer fits its declaration (e.g. the pool changed) is generated anew
+    const stale = { ...loans([['Dune', 'Ada']]), borrower: mkSet([tuple([book('Dune'), atom('MEMBER', 'Zed', 99)])]) };
+    const ex = okOp(exampleOperation(LIBRARY, an, 'op-lend', 2, 'applicable', { before: stale }));
+    expect(texts(ex.before)).toEqual({ onLoan: '{Dune}', borrower: expect.stringMatching(/^\{Dune ↦ \w+\}$/) });
+    expect(ex.freshBefore).toBeUndefined();
+  });
+
+  it('uses a fresh state if the given one no longer fits the spec', () => {
+    const broken = { onLoan: mkSet([book('Dune')]), borrower: EMPTY }; // onLoan ≠ dom borrower
+    const ex = okOp(exampleOperation(LIBRARY, an, 'op-lend', 1, 'applicable', { before: broken }));
+    expect(ex.freshBefore).toBe(true);
+    expect(ex.checks.every((c) => c.result === true)).toBe(true);
+  });
+
+  it('is unchanged without a given state (the goal checker relies on it)', () => {
+    for (const seed of [1, 2, 3]) {
+      expect(exampleOperation(LIBRARY, an, 'op-lend', seed, 'applicable', {})).toEqual(exampleOperation(LIBRARY, an, 'op-lend', seed, 'applicable'));
+    }
+  });
+});
 
 describe('infinite sets and the search limits', () => {
   const one = (decls: string, preds: string, given = '[]', infinite: string[] = []): SpecDoc => ({
@@ -500,9 +664,9 @@ describe('infinite sets and the search limits', () => {
     const spec = one('x : ℕ', '∀ n : ℕ • n ≥ 0\nx = 3\n∀ n : 0 .. x • n ≤ 3');
     const ex = okState(exampleState(spec, analyseSpec(spec), 1));
     expect(ex.checks.map((c) => [c.text, c.result, c.bounded ?? false])).toEqual([
-      ['∀ n : ℕ • n ≥ 0', true, true],
+      ['∀ n ∈ ℕ . n ≥ 0', true, true],
       ['x = 3', true, false],
-      ['∀ n : 0 .. x • n ≤ 3', true, false],
+      ['∀ n ∈ 0 .. x . n ≤ 3', true, false],
     ]);
   });
 
@@ -623,6 +787,7 @@ describe('templates', () => {
 
   for (const { label, make } of variants) {
     it(`produce applicable examples within the time budget (${label} version)`, () => {
+      const wall = performance.now();
       const times: number[] = [];
       const rows: string[] = [];
       for (const t of TEMPLATES) {
@@ -678,10 +843,122 @@ describe('templates', () => {
       const sorted = [...times].sort((a, b) => a - b);
       expect(sorted[Math.floor(sorted.length * 0.95)]).toBeLessThan(30);
       expect(sorted[sorted.length - 1]).toBeLessThan(90);
+      // and in real time (~1–2 s on a laptop; generous, as tests may run under load)
+      expect(performance.now() - wall).toBeLessThan(30000);
     });
   }
 
-  it('flags what the student has not specified yet as free (medication Prescribe)', () => {
+  it('finds blocked cases that follow from the invariant after (medication Prescribe)', () => {
+    const t = TEMPLATES.find((x) => x.id === 'medication');
+    if (!t) throw new Error('medication template missing');
+    const spec = fullSpec(t);
+    const op = spec.operations.find((o) => o.name === 'Prescribe')!;
+    op.preds = 'prescribed′ = prescribed ∪ {p? ↦ drug?}';
+    const an = analyseSpec(spec);
+    let outside = 0;
+    for (const seed of SEEDS.slice(0, 8)) {
+      const ex = okOp(exampleOperation(spec, an, op.id, seed, 'blocked'));
+      expect(ex.status).toBe('blocked');
+      const patients = byName(ex.before, 'patients').value;
+      const allergic = byName(ex.before, 'allergic').value;
+      const p = byName(ex.inputs, 'p?').value;
+      const pd = tuple([p, byName(ex.inputs, 'drug?').value]);
+      const notAdmitted = !elems(patients).some((x) => printValue(x) === printValue(p));
+      const isAllergic = elems(allergic).some((x) => printValue(x) === printValue(pd));
+      // no after-state satisfies the invariant: p? is not a patient, or p? is allergic to drug?
+      expect(notAdmitted || isAllergic).toBe(true);
+      if (notAdmitted) outside++;
+      expect(ex.failed?.length).toBeGreaterThan(0);
+      expect(ex.failed!.map((c) => c.text)).toContain(notAdmitted ? 'dom prescribed′ ⊆ patients′' : 'prescribed′ ∩ allergic′ = ∅');
+      expect(ex.checks.filter((c) => c.origin === 'invariant').every((c) => c.result === true)).toBe(true);
+    }
+    expect(outside).toBeGreaterThan(0);
+  });
+
+  it('says "never blocked" only when that is certain', () => {
+    const access = TEMPLATES.find((x) => x.id === 'access-control');
+    if (!access) throw new Error('access-control template missing');
+    const spec = fullSpec(access);
+    const grant = spec.operations.find((o) => o.name === 'GrantPermission')!;
+    expect(exampleOperation(spec, analyseSpec(spec), grant.id, 1, 'blocked')).toMatchObject({
+      ok: false,
+      reason: 'no-blocked',
+      message: 'GrantPermission has no precondition, so it is never blocked.',
+    });
+    // LoansOf is never blocked either, but books! = { b ∈ onLoan | borrower(b) = member? } needs
+    // the invariant to be defined: not certain here
+    const lib2 = lib((s) => s.operations.push(structuredClone(LOANS_OF)));
+    expect(exampleOperation(lib2, analyseSpec(lib2), 'op-loans', 1, 'blocked')).toMatchObject({
+      ok: false,
+      reason: 'no-blocked',
+      message: 'No blocked case found.',
+    });
+  });
+
+  it('checks number quantifiers against the numbers in the example (bank)', () => {
+    const t = TEMPLATES.find((x) => x.id === 'bank-account');
+    if (!t) throw new Error('bank-account template missing');
+    const spec = fullSpec(t);
+    spec.state.preds = 'dom balance = dom owner\ndom overdraft = dom owner\n∀ a ∈ dom balance; b ∈ ℤ . (a ↦ b) ∈ balance ⇒ b ≥ -overdraft(a)';
+    const query = spec.operations.find((o) => o.name === 'QueryBalance')!;
+    query.preds = 'a? ∈ dom owner\nowner(a?) = p?\n∀ x ∈ ℤ . (a? ↦ x) ∈ balance ⇒ b! = x';
+    const an = analyseSpec(spec);
+    const u = universeFor(spec, an, 1);
+    for (const seed of SEEDS.slice(0, 8)) {
+      const st = okState(exampleState(spec, an, seed));
+      const env = new Map(st.vars.map((v) => [v.name, v.value] as [string, Value]));
+      expect(evalPred(parseTerm('∀ a ∈ dom balance . balance(a) ≥ -overdraft(a)').term!, env, u)).toBe(true);
+      const ex = okOp(exampleOperation(spec, an, query.id, seed, 'applicable'));
+      const opEnv = new Map([...ex.before, ...ex.inputs, ...ex.outputs].map((v) => [v.name, v.value] as [string, Value]));
+      expect(evalPred(parseTerm('b! = balance(a?)').term!, opEnv, u)).toBe(true);
+    }
+  });
+
+  it('works with products of infinite given sets (medication)', () => {
+    const t = TEMPLATES.find((x) => x.id === 'medication');
+    if (!t) throw new Error('medication template missing');
+    const spec = fullSpec(t);
+    spec.state.preds = 'dom allergic ⊆ patients\ndom prescribed ⊆ patients\nprescribed ⊆ (PATIENT × DRUG) ∖ allergic';
+    const op = spec.operations.find((o) => o.name === 'Prescribe')!;
+    op.preds = 'p? ∈ patients\n(p? ↦ drug?) ∉ allergic\nprescribed′ = { x ∈ PATIENT × DRUG | x ∈ prescribed ∨ x = (p? ↦ drug?) }';
+    const an = analyseSpec(spec);
+    for (const seed of SEEDS.slice(0, 5)) {
+      const st = okState(exampleState(spec, an, seed));
+      expect(st.checks.every((c) => c.result === true && !c.bounded)).toBe(true);
+      const ex = okOp(exampleOperation(spec, an, op.id, seed, 'applicable'));
+      expect(ex.checks.every((c) => c.result === true && !c.bounded)).toBe(true);
+      expect(byName(ex.after, 'prescribed′').status).toBe('computed');
+    }
+  });
+
+  it('uses fixed values whatever the time budget (blood transfusion: compatible)', () => {
+    const t = TEMPLATES.find((x) => x.id === 'blood-transfusion');
+    if (!t) throw new Error('blood-transfusion template missing');
+    const spec = fullSpec(t);
+    const an = analyseSpec(spec);
+    const table = printValue(okState(exampleState(spec, an, 1)).vars.find((v) => v.name === 'compatible')!.value);
+    let shown = 0;
+    for (const budgetMs of [0.05, 0.2, 0.5, 1, 2, 4]) {
+      for (const seed of SEEDS.slice(0, 5)) {
+        const runs: ShownVar[][] = [];
+        const st = exampleState(spec, an, seed, { budgetMs });
+        if (st.ok) runs.push(st.vars);
+        for (const op of spec.operations) {
+          const ex = exampleOperation(spec, an, op.id, seed, 'applicable', { budgetMs: budgetMs * 2 });
+          if (ex.ok) runs.push(ex.before);
+        }
+        for (const vars of runs) {
+          const c = byName(vars, 'compatible');
+          expect(c.fixed, `budget ${budgetMs}, seed ${seed}`).toBe(true);
+          expect(c.text).toBe(table);
+          shown++;
+        }
+      }
+    }
+    expect(shown).toBeGreaterThan(20);
+  });
+
+  it('shows what the student has not specified yet as unchanged (medication Prescribe)', () => {
     const t = TEMPLATES.find((x) => x.id === 'medication');
     if (!t) throw new Error('medication template missing');
     const spec = studentSpec(t);
@@ -690,7 +967,8 @@ describe('templates', () => {
     if (!op) throw new Error('no update operation');
     for (const seed of SEEDS.slice(0, 5)) {
       const ex = okOp(exampleOperation(spec, an, op.id, seed, 'applicable'));
-      expect(byName(ex.after, 'prescribed′').status).toBe('free');
+      // prescribed′ is not mentioned yet, so it stays unchanged (frame convention)
+      expect(byName(ex.after, 'prescribed′').status).toBe('unchanged');
       expect(byName(ex.after, 'patients′').status).toBe('unchanged');
       expect(byName(ex.after, 'allergic′').status).toBe('unchanged');
     }

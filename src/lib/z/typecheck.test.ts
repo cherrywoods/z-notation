@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SchemaDoc, SpecDoc } from '../spec/model';
 import { LIBRARY, LOANS_OF } from './testing/library';
 import { analyseSpec, type Analysis } from './index';
@@ -6,8 +6,15 @@ import { parseTerm } from './parser';
 import { printTerm } from './print';
 import { TypeChecker, type Scope } from './typecheck';
 import { exampleOperation } from './generate';
+import { referenceSpecOf } from '../spec/topics';
 import { infer } from './infer';
 import { describeType, given, power, relation, typeToString, INT } from './types';
+import { useWorkClock } from './gen/clock';
+
+// Example searches count work instead of milliseconds here (gen/clock), so the results
+// do not depend on the machine's speed or load.
+beforeAll(() => useWorkClock(true));
+afterAll(() => useWorkClock(false));
 
 const LIB_WITH_LOANS: SpecDoc = { ...LIBRARY, operations: [...LIBRARY.operations, LOANS_OF] };
 
@@ -232,11 +239,49 @@ describe('scope diagnostics', () => {
 
   it('only allows types in declarations', () => {
     expect(messages(analyseSpec(lib({ lend: { decls: 'ΔLibrary\nbook? : onLoan\nmember? : MEMBER' } })))).toEqual([
-      '‘onLoan’ is a variable, not a type. Declare ‘book? : BOOK’ and add ‘book? ∈ onLoan’ below the line.',
+      '‘onLoan’ is a variable, not a type. Declare book? with a type, ‘book? : BOOK’, and add ‘book? ∈ onLoan’ as a predicate.',
     ]);
     expect(messages(analyseSpec(lib({ state: { decls: 'onLoan : ℙ BOOK\nborrower : onLoan ⇸ MEMBER' } })))).toEqual([
-      '‘onLoan’ is a variable — above the line use types only (given sets, ℕ, ℤ, ℙ, ⇸ …) and state conditions below the line.',
+      '‘onLoan’ is a variable, not a type. Declare borrower with a type, ‘borrower : BOOK ⇸ MEMBER’, and add ‘dom borrower ⊆ onLoan’ as a predicate.',
     ]);
+  });
+
+  it('spells out how to declare a type instead of a set built from variables', () => {
+    const rail = (decls: string, preds = '') =>
+      analyseSpec(
+        spec('[TRAIN, BLOCK, SIGNAL]', ['Rail', 'at : TRAIN ⇸ BLOCK\ngreen : ℙ SIGNAL', ''], [['Move', `ΔRail\n${decls}`, preds]]),
+      );
+    expect(messages(rail('t? : dom at'))).toEqual([
+      '‘at’ is a variable, not a type. Declare t? with a type, ‘t? : TRAIN’, and add ‘t? ∈ dom at’ as a predicate.',
+    ]);
+    expect(messages(rail('s? : SIGNAL ∖ green'))).toEqual([
+      '‘green’ is a variable, not a type. Declare s? with a type, ‘s? : SIGNAL’, and add ‘s? ∈ SIGNAL ∖ green’ as a predicate.',
+    ]);
+    expect(messages(rail('b? : ran at′'))).toEqual([
+      '‘at′’ is a variable, not a type. Declare b? with a type, ‘b? : BLOCK’, and add ‘b? ∈ ran at′’ as a predicate.',
+    ]);
+    expect(messages(rail('gs? : ℙ green'))).toEqual([
+      '‘green’ is a variable, not a type. Declare gs? with a type, ‘gs? : ℙ SIGNAL’, and add ‘gs? ⊆ green’ as a predicate.',
+    ]);
+    expect(messages(rail('w! : dom at → ran at'))).toEqual([
+      '‘at’ is a variable, not a type. Declare w! with a type, ‘w! : TRAIN ⇸ BLOCK’, and add ‘dom w! = dom at’ and ‘ran w! ⊆ ran at’ as predicates.',
+    ]);
+    expect(messages(rail('ts? : ℙ TRAIN\nt? : ts?'))).toEqual([
+      '‘ts?’ is a variable, not a type. Declare t? with a type, ‘t? : TRAIN’, and add ‘t? ∈ ts?’ as a predicate.',
+    ]);
+    // the declared variable gets the type, so the predicates are checked as usual
+    const msg = '‘at’ is a variable, not a type. Declare t? with a type, ‘t? : TRAIN’, and add ‘t? ∈ dom at’ as a predicate.';
+    expect(messages(rail('t? : dom at\nb? : BLOCK', 'at′ = at ∪ {t? ↦ b?}'))).toEqual([msg]);
+    expect(messages(rail('t? : dom at', 'green′ = green ∪ {t?}'))).toEqual([
+      msg,
+      '‘∪’ needs two sets of the same type, but ‘green’ is a set of SIGNAL and ‘{t?}’ is a set of TRAIN.',
+    ]);
+
+    const ward = spec('[PATIENT, DRUG]', ['Ward', 'patients : ℙ PATIENT\nallergic : patients ↔ DRUG', '']);
+    expect(messages(analyseSpec(ward))).toEqual([
+      '‘patients’ is a variable, not a type. Declare allergic with a type, ‘allergic : PATIENT ↔ DRUG’, and add ‘dom allergic ⊆ patients’ as a predicate.',
+    ]);
+    expect(analyseSpec(ward).ok).toBe(false);
   });
 
   it('reports duplicates and schema names used as values', () => {
@@ -320,6 +365,23 @@ describe('type errors in student terms', () => {
 
   it('does not cascade after an unknown name', () => {
     expect(lend('dom (borrowr ∪ {book? ↦ member?}) = onLoan ∪ {book?}')).toEqual(['Unknown name ‘borrowr’ — did you mean ‘borrower’?']);
+  });
+
+  it('does not add follow-up errors about erroneous operands', () => {
+    const state = (preds: string) => messages(analyseSpec(lib({ state: { preds: `onLoan = dom borrower\n${preds}` } })));
+    expect(state('onLoan = {Dune, 1}')).toEqual(['Unknown name ‘Dune’.']);
+    expect(state('onLoan = Dune .. 3')).toEqual(['Unknown name ‘Dune’.']);
+    expect(state('onLoan = {Dune .. 3}')).toEqual(['Unknown name ‘Dune’.']);
+    expect(state('#onLoan = #{Dune} + Emma')).toEqual(['Unknown name ‘Dune’.', 'Unknown name ‘Emma’.']);
+    expect(state('borrower(Dune) = onLoan')).toEqual(['Unknown name ‘Dune’.']);
+    // an error inside an operand does not hide errors elsewhere
+    expect(state('onLoan = {Dune}\n#onLoan = onLoan')).toEqual([
+      'Unknown name ‘Dune’.',
+      'Both sides of ‘=’ must have the same type, but ‘#onLoan’ is a number and ‘onLoan’ is a set of BOOK.',
+    ]);
+    // a declaration with an unknown element keeps its other errors to itself
+    const a = analyseSpec(lib({ state: { decls: 'onLoan : ℙ BOOK\nborrower : BOOK ⇸ MEMBER\nx : {Dune, 1}', preds: 'onLoan = dom borrower\nx ∈ onLoan' } }));
+    expect(messages(a)).toEqual(['Unknown name ‘Dune’.']);
   });
 
   it('infers the type of ∅', () => {
@@ -431,8 +493,8 @@ describe('names from outside the tutorial', () => {
   };
 
   it('explains seq, min, max, succ and ASCII number sets', () => {
-    expect(lendPreds('#onLoan < max onLoan')).toEqual(['‘max’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x : S • x ≤ m).']);
-    expect(lendPreds('#onLoan = min(onLoan)')).toEqual(['‘min’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x : S • m ≤ x).']);
+    expect(lendPreds('#onLoan < max onLoan')).toEqual(['‘max’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x ∈ S . x ≤ m).']);
+    expect(lendPreds('#onLoan = min(onLoan)')).toEqual(['‘min’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x ∈ S . m ≤ x).']);
     expect(lendPreds('#onLoan′ = succ(#onLoan)')).toEqual(['‘succ’ is not part of this tutorial — write ‘n + 1’.']);
     expect(lendPreds('#onLoan ∈ N')).toEqual(['Unknown name ‘N’ — did you mean ℕ (type NN)?']);
     expect(lendPreds('#onLoan ∈ ZZ')).toEqual(['Unknown name ‘ZZ’ — did you mean ℤ (type ZZ and a space)?']);
@@ -446,6 +508,77 @@ describe('names from outside the tutorial', () => {
     s.state.decls += '\nmax : ℕ';
     s.state.preds += '\n#onLoan ≤ max';
     expect(messages(analyseSpec(s))).toEqual([]);
+  });
+});
+
+describe('declarations with ∅', () => {
+  const withX = (type: string, preds = '') =>
+    analyseSpec(lib({ state: { decls: `onLoan : ℙ BOOK\nborrower : BOOK ⇸ MEMBER\nx : ${type}`, preds: `onLoan = dom borrower${preds}` } }));
+
+  it('reports an empty set as a type', () => {
+    for (const t of ['∅', '{}']) {
+      const a = withX(t, '\nx = 1');
+      expect(fmt(a), t).toEqual([
+        `state:decls type/error 45-${45 + t.length}: ‘∅’ is the empty set, so this variable could never have a value. After ‘:’ comes a type like NAME or ℙ NAME.`,
+      ]);
+      expect(a.ok).toBe(false);
+    }
+    expect(messages(withX('ℙ ∅', '\nx = 1'))).toEqual([
+      '‘ℙ ∅’ does not tell the type (∅ could be a set of anything). After ‘:’ comes a type like NAME or ℙ NAME.',
+    ]);
+    expect(messages(withX('∅ ⇸ BOOK'))).toHaveLength(1);
+    const op = lib({ lend: { decls: 'ΔLibrary\nbook? : BOOK\nmember? : ∅' } });
+    expect(messages(analyseSpec(op))).toEqual([
+      '‘∅’ is the empty set, so this variable could never have a value. After ‘:’ comes a type like NAME or ℙ NAME.',
+    ]);
+  });
+
+  it('keeps ∅ in quantifiers and comprehensions', () => {
+    expect(messages(withX('ℙ BOOK', '\nx = { b ∈ ∅ | b ∈ onLoan }\n∀ b ∈ ∅ . b ∈ x'))).toEqual([]);
+  });
+
+  it('never mixes up the unknown types of different checkers', () => {
+    const empty = parseTerm('∅').term!;
+    const tc1 = new TypeChecker({ section: { schemaId: 'x', part: 'preds' } });
+    const tc2 = new TypeChecker({ section: { schemaId: 'x', part: 'preds' } });
+    const t1 = tc1.checkExpression(empty, new Map());
+    const t2 = tc2.checkExpression(empty, new Map());
+    expect(t1).toMatchObject({ k: 'power', elem: { k: 'var' } });
+    expect(t2).toMatchObject({ k: 'power', elem: { k: 'var' } });
+    expect(t1).not.toEqual(t2);
+  });
+});
+
+describe('a!=b', () => {
+  it('means ≠ where there is no output a!', () => {
+    const a = analyseSpec(lib({ state: { decls: 'onLoan : ℙ BOOK\nborrower : BOOK ⇸ MEMBER\na : BOOK\nb : BOOK', preds: 'onLoan = dom borrower\na!=b' } }));
+    expect(fmt(a)).toEqual(['state:preds syntax/error 23-25: Write ‘≠’ (or ‘/=’) for “not equal”: ‘a ≠ b’.']);
+    const lend = (preds: string, decls = 'ΔLibrary\nbook? : BOOK\nmember? : MEMBER') => messages(analyseSpec(lib({ lend: { decls, preds } })));
+    expect(lend('book? ∉ onLoan\nborrower′ = borrower ∪ {book? ↦ member?}\nonLoan!= ∅')).toEqual([
+      'Write ‘≠’ (or ‘/=’) for “not equal”: ‘onLoan ≠ ∅’.',
+    ]);
+  });
+
+  it('is x! = … in an operation with the output x!', () => {
+    const decls = 'ΞLibrary\nbook? : BOOK\nonLoan! : ℙ BOOK';
+    const s = lib({ find: { decls, preds: 'onLoan!=onLoan' } });
+    expect(messages(analyseSpec(s))).toEqual([]);
+  });
+
+  it('keeps the message for outputs in the state schema', () => {
+    expect(messages(analyseSpec(lib({ state: { preds: 'onLoan = dom borrower\nout! = onLoan' } })))).toEqual([
+      'Inputs and outputs (like ‘out!’) only exist in operations.',
+    ]);
+  });
+});
+
+describe('names that are also JavaScript properties', () => {
+  it('are plain names', () => {
+    const a = analyseSpec({ ...structuredClone(LIBRARY), given: '[BOOK, MEMBER, constructor]' });
+    expect(fmt(a)).toEqual([]);
+    const b = analyseSpec(lib({ state: { preds: 'onLoan = dom borrower\ntoString = 1\nhasOwnProperty ∈ onLoan' } }));
+    expect(messages(b)).toEqual(['Unknown name ‘toString’.', 'Unknown name ‘hasOwnProperty’.']);
+    expect(b.diagnostics.every((d) => typeof d.message === 'string')).toBe(true);
   });
 });
 
@@ -465,6 +598,63 @@ describe('given sets', () => {
     expect(a.givenSets).toEqual(['BOOK', 'MEMBER']);
     expect(messages(a)).toEqual(['Separate the names with ‘,’']);
     expect(analyseSpec({ ...structuredClone(LIBRARY), given: '[BOOK, MEMBER, ℕ]' }).givenSets).toEqual(['BOOK', 'MEMBER']);
+  });
+});
+
+describe('frame convention and pointwise updates', () => {
+  const bank = referenceSpecOf('bank-account')!;
+  const withdraw = (f: (preds: string) => string): SpecDoc => {
+    const s = structuredClone(bank);
+    const w = s.operations.find((o) => o.name === 'Withdraw')!;
+    w.preds = f(w.preds);
+    return s;
+  };
+  const frameOf = (s: SpecDoc) =>
+    analyseSpec(s)
+      .byId['op-withdraw'].preds.filter((p) => p.origin === 'frame')
+      .map((p) => printTerm(p.term));
+  const noFrameLines = (p: string) => p.replace('\nowner′ = owner', '').replace('\noverdraft′ = overdraft', '');
+
+  it('adds v′ = v for state variables the Δ operation does not mention', () => {
+    expect(frameOf(bank)).toEqual([]);
+    expect(frameOf(withdraw(noFrameLines))).toEqual(['owner′ = owner', 'overdraft′ = overdraft']);
+    // a line that does not parse yet still counts as mentioning owner′
+    expect(frameOf(withdraw((p) => noFrameLines(p) + '\nowner′ = owner ∪'))).toEqual(['overdraft′ = overdraft']);
+    // Ξ operations have their own v′ = v; only Δ gets the frame
+    expect(analyseSpec(bank).byId['op-query-balance'].preds.filter((p) => p.origin === 'frame')).toEqual([]);
+  });
+
+  it('does not freeze what the invariant determines (onLoan′ = dom borrower′)', () => {
+    expect(analyseSpec(LIBRARY).byId['op-lend'].preds.filter((p) => p.origin === 'frame')).toEqual([]);
+  });
+
+  it('shows unmentioned variables as unchanged in examples', () => {
+    const s = withdraw(noFrameLines);
+    const ex = exampleOperation(s, analyseSpec(s), 'op-withdraw', 1, 'applicable');
+    if (!ex.ok) throw new Error(ex.message);
+    expect(ex.after.map((v) => `${v.name}:${v.status}`)).toEqual(['owner′:unchanged', 'balance′:computed', 'overdraft′:unchanged']);
+  });
+
+  it('warns when a function is only fixed at one point', () => {
+    const pointwise = withdraw((p) => p.replace(/^balance′ = .*$/m, 'balance′(a?) = balance(a?) - amount?'));
+    const a = analyseSpec(pointwise);
+    const warnings = a.diagnostics.filter((d) => d.severity === 'warning');
+    expect(warnings.map((d) => d.message)).toEqual([
+      'This only fixes balance′(a?). Other values of balance′ could change too — say what happens to the whole function, e.g. ‘balance′ = …’.',
+    ]);
+    const doc = pointwise.operations.find((o) => o.name === 'Withdraw')!;
+    expect(doc.preds.slice(warnings[0].from, warnings[0].to)).toBe('balance′(a?) = balance(a?) - amount?');
+    expect(a.ok).toBe(true); // valid Z: only a warning
+    // the standard meaning: no frame for balance, and the other values are open
+    expect(a.byId['op-withdraw'].preds.filter((p) => p.origin === 'frame').map((p) => printTerm(p.term))).toEqual([]);
+    const ex = exampleOperation(pointwise, a, 'op-withdraw', 1, 'applicable');
+    expect(ex.ok && ex.after.find((v) => v.name === 'balance′')?.status).toBe('free');
+  });
+
+  it('does not warn for whole-function updates', () => {
+    expect(analyseSpec(bank).diagnostics).toEqual([]);
+    const both = withdraw((p) => p.replace(/^balance′ = .*$/m, 'balance′(a?) = balance(a?) - amount?\ndom balance′ = dom balance'));
+    expect(analyseSpec(both).diagnostics).toEqual([]);
   });
 });
 

@@ -6,6 +6,7 @@
   import { explainCtxOf, givenNames } from '../../lib/spec/helpers';
   import type { Derivation } from '../../lib/spec/model';
   import ZText from '../z/ZText.svelte';
+  import DerivationView from './DerivationView.svelte';
 
   let { schemaId }: { schemaId: string } = $props();
 
@@ -25,22 +26,27 @@
   const items = $derived.by((): Item[] => {
     const inf = live.inferred;
     if (!inf) return [];
-    const mine = inf.facts.filter((f) => f.schemaId === schemaId);
+    // most telling first: what the invariant guarantees, then effects and consequences
+    const ORDER: Record<string, number> = { guaranteed: 0, effect: 1, implied: 2, initial: 3, defined: 4 };
+    const mine = inf.facts.filter((f) => f.schemaId === schemaId).sort(
+      (a, b) => (ORDER[a.kind] ?? 9) - (ORDER[b.kind] ?? 9),
+    );
     const facts: Item[] = [];
     // Ξ: all "v′ = v" facts in one line
-    const unchanged = mine.filter((f) => f.kind === 'unchanged');
-    if (unchanged.length) {
-      const text = unchanged.map((f) => f.text).join(' ∧ ');
-      const reason = unchanged[0].derivation.kind === 'chain' ? unchanged[0].derivation.steps[0]?.reason : undefined;
-      facts.push({ key: 'unchanged', text, tag: '', note: '', reason: reason ?? `Ξ${live.spec?.state.name ?? ''}` });
-    }
+    // "v′ = v" facts (from Ξ, or for variables an operation does not mention) are not
+    // shown: they only restate the import and add noise (lecturer's decision).
     for (const f of mine) {
       if (f.kind === 'unchanged') continue;
       const d = f.derivation;
       // "x ∈ dom f [precondition] ⊢ x ∈ dom f" says nothing new
       if (d.kind === 'facts' && d.premises.length === 1 && d.premises[0].text === d.conclusion) continue;
       const app = f.kind === 'defined' ? application(f.text) : null;
-      facts.push({ key: `f:${f.text}`, text: app ?? f.text, tag: app ? 'defined' : '', note: '', derivation: d });
+      const tag = app
+        ? 'defined'
+        : f.kind === 'guaranteed'
+          ? 'guaranteed by the invariant'
+          : ((f as { note?: string }).note ?? '');
+      facts.push({ key: `f:${f.text}`, text: app ?? f.text, tag, note: '', derivation: d });
     }
     const redundant = inf.redundant
       .filter((d) => d.section.schemaId === schemaId && d.derivation)
@@ -80,7 +86,7 @@
           </button>
           {#if !collapsed[it.key]}
             <div class="steps" transition:slide={{ duration: 180 }}>
-              {@render derivation(it.derivation)}
+              <DerivationView d={it.derivation} {given} {ctx} />
             </div>
           {/if}
           {/if}
@@ -90,27 +96,6 @@
   </section>
 {/if}
 
-{#snippet derivation(d: Derivation)}
-  <div class="grid">
-    {#if d.kind === 'chain'}
-      <span class="rel"></span><span class="expr"><ZText text={d.start} givenSets={given} {ctx} /></span><span class="why"></span>
-      {#each d.steps as s, i (i)}
-        <span class="rel">{s.rel}</span>
-        <span class="expr"><ZText text={s.expr} givenSets={given} {ctx} /></span>
-        <span class="why">[{s.reason}]</span>
-      {/each}
-    {:else}
-      {#each d.premises as p, i (i)}
-        <span class="rel"></span>
-        <span class="expr"><ZText text={p.text} givenSets={given} {ctx} /></span>
-        <span class="why">[{p.reason}]</span>
-      {/each}
-      <span class="rel">⊢</span>
-      <span class="expr"><ZText text={d.conclusion} givenSets={given} {ctx} /></span>
-      <span class="why"></span>
-    {/if}
-  </div>
-{/snippet}
 
 <style>
   .panel {
@@ -181,21 +166,6 @@
   }
   .steps {
     padding: 4px 0 0 1.25em;
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: 1.1em minmax(0, max-content) minmax(max-content, 1fr);
-    column-gap: 8px;
-    row-gap: 1px;
-    align-items: baseline;
-  }
-  .rel {
-    font-family: var(--font-z);
-    color: var(--fg);
-    text-align: center;
-  }
-  .expr :global(.z-text) {
-    font-size: calc(1rem * var(--z-scale, 1));
   }
   .why {
     justify-self: end;

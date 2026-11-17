@@ -20,28 +20,32 @@
   }
   let { ex, ctx, pinned, canBack = false, titleId, onclose, onback }: Props = $props();
 
-  /** Sets coloured as types inside the card (generic X, Y and the library example's sets). */
-  const CARD_GIVEN = ['X', 'Y', 'BOOK', 'MEMBER'];
+  /** Sets coloured as types inside the card: generic X, Y and those of the example systems. */
+  const CARD_GIVEN = ['X', 'Y', 'PATIENT', 'DRUG', 'ACCOUNT', 'PERSON', 'SIGNAL', 'BLOCK'];
 
   // Context for the Z text inside the card: same state as the hovered symbol (default: the
-  // library example); the hovered identifier itself (subject) does not carry over.
+  // Medication ward); the hovered identifier itself (subject) does not carry over.
   const cardCtx = $derived<ExplainerContext>({
     givenSets: [...CARD_GIVEN, ...(ctx?.givenSets ?? [])],
-    stateName: ctx?.stateName || (ctx?.stateVars ? 'State' : 'Library'),
-    stateVars: ctx?.stateName || ctx?.stateVars ? ctx.stateVars : ['onLoan', 'borrower'],
+    stateName: ctx?.stateName || (ctx?.stateVars ? 'State' : 'Ward'),
+    stateVars: ctx?.stateName || ctx?.stateVars ? ctx.stateVars : ['patients', 'allergic', 'prescribed'],
   });
 
   const hasMore = $derived(!!(ex.example || ex.exampleSchema || ex.diagram || ex.notes?.length));
   const word = $derived(/^[a-z]+$/.test(ex.symbol));
-  /** x′ x? x!: the variable in italics, the decoration in its colour. */
+  /** x′ x? x!: the variable in plain text, the decoration in its colour. */
   const deco = $derived(/^x[′?!]$/.test(ex.symbol));
+  /** The period of ∀ x ∈ S . P: shown in context, since a lone '.' is hard to see. */
+  const period = $derived(ex.symbol === '.');
   const wide = $derived(ex.symbol.length > 2 && !word);
 </script>
 
 <div class="card" class:pinned>
   <header>
     {#if deco}
-      <span class="glyph deco" aria-hidden="true"><i>x</i><span class="z-decoration">{ex.symbol.slice(1)}</span></span>
+      <span class="glyph deco" aria-hidden="true"><span class="v">x</span><span class="z-decoration">{ex.symbol.slice(1)}</span></span>
+    {:else if period}
+      <span class="glyph period" aria-hidden="true"><span>x <span class="faint">∈</span> S<b class="z-logic">.</b>P</span></span>
     {:else if ex.symbol}
       <span class="glyph z-{ex.category ?? 'logic'}" class:word class:wide aria-hidden="true">{ex.symbol}</span>
     {:else}
@@ -160,8 +164,23 @@
     justify-content: center;
     align-items: center;
   }
-  .glyph.deco i {
+  .glyph.deco .v {
     padding-right: 1px;
+  }
+  .glyph.period {
+    font-family: var(--font-z);
+    font-size: 16px;
+    padding: 0 9px;
+    white-space: pre;
+  }
+  .glyph.period .faint {
+    color: var(--fg-faint);
+  }
+  .glyph.period b {
+    font-size: 24px;
+    line-height: 1;
+    font-weight: 700;
+    margin: 0 3px;
   }
   .schema-glyph svg path {
     fill: none;

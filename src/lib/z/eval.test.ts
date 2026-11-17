@@ -124,7 +124,7 @@ describe('Library', () => {
       err = e;
     }
     expect(err).toBeInstanceOf(EvalError);
-    expect((err as EvalError).message).toBe('borrower(Ulysses) is undefined: Ulysses ∉ dom borrower');
+    expect((err as EvalError).message).toBe('borrower(book?) is undefined: book? = Ulysses ∉ dom borrower');
     expect((err as EvalError).reason).toBe('undefined');
     expect((err as EvalError).span).toEqual({ from: 10, to: 25 });
 
@@ -133,7 +133,7 @@ describe('Library', () => {
       'f(Ulysses) is undefined: f relates Ulysses to several values (Cleo, Eva)',
     );
     expect(() => evalTerm(T('(f ∪ g)(x)'), new Map<string, Value>([['f', EMPTY], ['g', EMPTY], ['x', int(1)]]), u)).toThrow(
-      '(f ∪ g)(1) is undefined: 1 ∉ dom (f ∪ g)',
+      '(f ∪ g)(x) is undefined: x = 1 ∉ dom (f ∪ g)',
     );
   });
 
@@ -224,7 +224,7 @@ describe('infinite sets: exact or bounded verdicts', () => {
   it('does not count probe errors as counterexamples', () => {
     const f = mkSet([0, 1, 2, 3, 4, 5, 6].map((n) => pair(int(n), int(n * n))));
     expect(check('∀ n : ℕ • f(n) ≥ 0', new Map([['f', f]]))).toBe('≈ true');
-    expect(() => evalPred(T('∀ n : ℤ • f(n) ≥ 0'), new Map([['f', f]]), u)).toThrow('f(-3) is undefined'); // inside the window
+    expect(() => evalPred(T('∀ n : ℤ • f(n) ≥ 0'), new Map([['f', f]]), u)).toThrow('f(n) is undefined: n = -3 ∉ dom f'); // inside the window
   });
 
   it('comprehensions over ℕ / ℤ are never equal to a finite set by accident', () => {
@@ -257,9 +257,12 @@ describe('infinite sets: exact or bounded verdicts', () => {
     expect(printValue(evalTerm(T('{ d : DATE | d ∈ dom f ∧ f(d) > 2 }'), env, dates))).toBe('{b}'); // exact and finite
     expect(check('{ d : DATE | d ∉ dom f } = {c}', new Map([...env, ['c', D('c')]]), dates)).toBe('false'); // infinite
     expect(check('#DATE = 3', env, dates)).toBe('≈ true'); // only the example elements are counted
-    // a function on all example dates is still not total on DATE
+    // a function given on all example dates: the example cannot show more of it, so
+    // statements about all of DATE are only bounded verdicts, and → counts on the examples
     const g = mkSet(['a', 'b', 'c'].map((n) => pair(D(n), int(1))));
-    expect(() => evalPred(T('∀ d : DATE • g(d) > 0'), new Map([['g', g]]), dates)).toThrow('g(another DATE) is undefined: another DATE ∉ dom g');
+    expect(check('∀ d : DATE • g(d) > 0', new Map([['g', g]]), dates)).toBe('≈ true');
+    expect(check('∀ d : DATE • g(d) > 5', new Map([['g', g]]), dates)).toBe('false'); // a is a counterexample
+    expect(check('g ∈ DATE → ℕ', new Map([['g', g]]), dates)).toBe('≈ true');
     expect(memberOfDeclared(f, T('DATE ⇸ ℕ'), new Map(), dates)).toBe(true);
     expect(memberOfDeclared(f, T('DATE → ℕ'), new Map(), dates)).toBe(false); // never total on an infinite set
     expect(isInfiniteSet(evalTerm(T('NAME ⇸ DATE'), env, dates) as SetLike, dates)).toBe(true);
@@ -351,5 +354,112 @@ describe('values', () => {
   it('compares lazy and finite sets exactly when possible', () => {
     expect(equalValues(lazy({ kind: 'range', lo: 1, hi: 2 }), mkSet([int(1), int(2)]), u)).toBe(true);
     expect(equalValues(lazy({ kind: 'nat1' }), mkSet([int(1)]), u)).toBe(false);
+  });
+});
+
+describe('nested sets compare by their elements', () => {
+  it('a power set inside a set display or tuple equals its listed elements', () => {
+    const e = new Map<string, Value>();
+    expect(evalPred(T('{ℙ {1}} = {{∅, {1}}}'), e, u)).toBe(true);
+    expect(evalPred(T('(ℙ {1}, 2) = ({∅, {1}}, 2)'), e, u)).toBe(true);
+    expect(evalPred(T('ℙ {1} ∈ {{∅, {1}}}'), e, u)).toBe(true);
+    expect(evalPred(T('{1 .. 3} = {{1, 2, 3}}'), e, u)).toBe(true);
+    expect(evalPred(T('{ℙ {1}} = {{{1}}}'), e, u)).toBe(false);
+    const f = mkSet([pair(mkSet([EMPTY, mkSet([int(1)])]), int(7))]);
+    expect(evalTerm(T('f(ℙ {1})'), new Map([['f', f]]), u)).toEqual(int(7));
+  });
+});
+
+describe('quantifier bindings', () => {
+  it('evaluates a guard before the declared sets of later variables (Z: f(b) does not matter for b ∉ dom f)', () => {
+    const P = (n: string) => u.carriers.MEMBER.find((a) => a.k === 'atom' && a.name === n)!;
+    const f = mkSet([pair(B('Dune'), mkSet([P('Ada'), P('Ben')])), pair(B('Emma'), EMPTY)]);
+    const env = new Map<string, Value>([
+      ['f', f],
+      ['Ada', P('Ada')],
+      ['Ben', P('Ben')],
+    ]);
+    for (const src of [
+      '∀ b ∈ BOOK; m ∈ f(b) | b ∈ dom f . m ∈ MEMBER',
+      '∀ b ∈ BOOK; m ∈ f(b) . b ∈ dom f ⇒ m ∈ MEMBER',
+      '{ b ∈ BOOK; m ∈ f(b) | b ∈ dom f . m } = {Ada, Ben}',
+    ]) {
+      expect(evalPredChecked(T(src), env, u), src).toEqual({ value: true, bounded: false });
+    }
+    expect(evalPred(T('∀ b ∈ BOOK; m ∈ f(b) | b ∈ dom f . m = Ada'), env, u)).toBe(false);
+    expect(evalPred(T('∃ b ∈ BOOK; m ∈ f(b) | b ∈ dom f . m = Ben'), env, u)).toBe(true);
+    // without the guard, f(b) is undefined for books outside dom f
+    expect(() => evalPred(T('∀ b ∈ BOOK; m ∈ f(b) . m ∈ MEMBER'), env, u)).toThrow('is undefined');
+  });
+
+  it('never sees a later variable bound in an earlier declared set', () => {
+    const env = new Map<string, Value>([['x', mkSet([int(1)])]]);
+    // y ∈ x refers to the outer x (x is only bound after y)
+    expect(evalPred(T('∀ y ∈ x; x ∈ {{5}, {6}} . y = 1'), env, u)).toBe(true);
+    expect(evalTerm(T('{ y ∈ x; x ∈ {{5}, {6}} . (y, x) }'), env, u)).toEqual(
+      mkSet([tuple([int(1), mkSet([int(5)])]), tuple([int(1), mkSet([int(6)])])]),
+    );
+  });
+
+  it('bounds the total work of nested and multi-variable quantifiers (≈ instead of freezing)', () => {
+    const uX = makeUniverse({ X: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] });
+    for (const src of [
+      '∀ a, b ∈ ℙ X . a ∪ b = b ∪ a',
+      '∀ a, b, c ∈ ℙ X . a ∪ (b ∪ c) = (a ∪ b) ∪ c',
+      '∀ a ∈ ℙ X . ∀ b ∈ ℙ X . ∀ c ∈ ℙ X . a ∩ b ∩ c ⊆ a',
+      '#{ a, b ∈ ℙ X | a ⊆ b } > 0',
+    ]) {
+      const t0 = performance.now();
+      const r = evalPredChecked(T(src), new Map(), uX);
+      expect(performance.now() - t0, src).toBeLessThan(500); // ~10 ms; minutes without the limit
+      expect(r, src).toEqual({ value: true, bounded: true });
+    }
+    // a counterexample found within the limit still decides exactly
+    expect(evalPredChecked(T('∀ a, b ∈ ℙ X . a ∪ b = a'), new Map(), uX)).toEqual({ value: false, bounded: false });
+    // small quantifiers are not affected
+    expect(evalPredChecked(T('∀ a, b ∈ ℙ {1, 2, 3} . a ∪ b = b ∪ a'), new Map(), uX)).toEqual({ value: true, bounded: false });
+  });
+});
+
+describe('numbers and products in quantifiers', () => {
+  const ub = makeUniverse({ ACCOUNT: ['DE4711', 'DE1001'], PATIENT: ['Ana', 'Ben'], DRUG: ['aspirin', 'insulin'] }, {
+    intMin: -5,
+    intMax: 20,
+    infinite: ['ACCOUNT', 'PATIENT', 'DRUG'],
+  });
+  const A = (n: string) => ub.carriers.ACCOUNT.find((a) => a.k === 'atom' && a.name === n)!;
+  const P = (n: string) => ub.carriers.PATIENT.find((a) => a.k === 'atom' && a.name === n)!;
+  const Dr = (n: string) => ub.carriers.DRUG.find((a) => a.k === 'atom' && a.name === n)!;
+
+  it('quantifiers over ℤ also try the numbers of the current values', () => {
+    const env = new Map<string, Value>([
+      ['balance', fn([A('DE1001'), int(-20)], [A('DE4711'), int(300)])],
+      ['overdraft', fn([A('DE1001'), int(10)], [A('DE4711'), int(0)])],
+      ['a?', A('DE4711')],
+      ['b!', int(0)],
+    ]);
+    expect(evalPredChecked(T('∀ a ∈ dom balance; b ∈ ℤ . (a ↦ b) ∈ balance ⇒ b ≥ -overdraft(a)'), env, ub)).toEqual({ value: false, bounded: false });
+    expect(evalPredChecked(T('∀ x ∈ ℤ . (a? ↦ x) ∈ balance ⇒ b! = x'), env, ub)).toEqual({ value: false, bounded: false });
+    expect(evalPredChecked(T('∃ x ∈ ℕ . (a? ↦ x) ∈ balance'), env, ub)).toEqual({ value: true, bounded: false });
+    // without a counterexample the verdict still rests on a sample
+    expect(evalPredChecked(T('∀ x ∈ ℤ . (a? ↦ x) ∈ balance ⇒ x = 300'), env, ub)).toEqual({ value: true, bounded: true });
+  });
+
+  it('handles products of infinite given sets like separate variables', () => {
+    const env = new Map<string, Value>([
+      ['prescribed', fn([P('Ana'), Dr('aspirin')])],
+      ['allergic', fn([P('Ana'), Dr('insulin')])],
+      ['p?', P('Ben')],
+      ['drug?', Dr('insulin')],
+      ['Ben', P('Ben')],
+      ['aspirin', Dr('aspirin')],
+    ]);
+    const exact = (src: string, value: boolean) => expect(evalPredChecked(T(src), env, ub), src).toEqual({ value, bounded: false });
+    exact('prescribed ⊆ (PATIENT × DRUG) ∖ allergic', true);
+    exact('allergic ⊆ (PATIENT × DRUG) ∖ allergic', false);
+    exact('(Ben ↦ aspirin) ∈ (PATIENT × DRUG) ∖ allergic', true);
+    exact('{ x ∈ PATIENT × DRUG | x ∈ prescribed ∨ x = (p? ↦ drug?) } = prescribed ∪ {p? ↦ drug?}', true);
+    exact('∀ x ∈ PATIENT × DRUG | x ∈ allergic . x ∉ prescribed', true);
+    exact('(PATIENT × DRUG) ∖ allergic = prescribed', false); // an infinite set is no finite one
   });
 });

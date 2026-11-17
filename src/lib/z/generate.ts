@@ -10,17 +10,18 @@
 
 import type { SpecDoc } from '../spec/model';
 import type { Term } from './ast';
-import { memberOfDeclared, type Universe } from './eval';
+import { evalPred, memberOfDeclared, type Universe } from './eval';
 import type { Analysis, PredInfo, SchemaInfo, VarInfo } from './index';
 import { parseTerm } from './parser';
 import { children, freeVars, nameTerm, printTerm } from './print';
+import { frameConflictMessage, framesIn } from './frame';
 import type { OpExample, PredCheck, ShownVar, StateExample, TypesExample } from './results';
 import type { ZType } from './types';
 import { EMPTY, atom, int, mkSet, printValue, tuple, valueEquals, type Value } from './values';
-import { compileDom, intScaleFor, isEmptyDom, type Dom } from './gen/dom';
+import { compileDom, completeEnum, emptyValue, intScaleFor, isEmptyDom, type Dom } from './gen/dom';
 import { truth } from './gen/dist';
 import { makeRng, type Rng } from './gen/rng';
-import { buildPlan, findWitness, isDetermined, now, solve, type Con, type Problem, type SolveResult, type Unknown } from './gen/solver';
+import { Search, buildPlan, findWitness, isDetermined, now, solve, type Con, type Problem, type SolveResult, type Unknown } from './gen/solver';
 
 /** Time budget per call (ms). Most calls finish far earlier. */
 const BUDGET = 45;
@@ -31,9 +32,10 @@ const INT_MAX = 20;
 // ── universe ───────────────────────────────────────────────────────────────────
 
 /**
- * Example carriers of the given sets: 4–6 values of each pool (in pool order), always
- * including the values used by `spec.fixed`; sets without a pool get name1 … name5
- * (TRAIN → train1, train2, …).
+ * Example carriers of the given sets: the whole pool, in pool order (the values the
+ * student sees and edits in the Types panel); sets without a pool get name1 … name5
+ * (TRAIN → train1, train2, …) plus the values used by `spec.fixed`. The carriers do not
+ * depend on the seed, so every step of the example lives in the same world.
  */
 export function universeFor(spec: SpecDoc, an: Analysis, seed: number): Universe {
   return guard(
@@ -75,6 +77,8 @@ interface Prepared {
   fixed: Map<string, Value>;
   givens: Set<string>;
   deadline: number;
+  /** The whole time budget (ms); phases get shares of it. */
+  budget: number;
   /** Numbers written in the predicates (extra candidates for numeric variables). */
   consts: number[];
 }
@@ -113,19 +117,14 @@ function buildUniverse(spec: SpecDoc, an: Analysis, seed: number): { u: Universe
     if (d.kind === 'binop' && d.op === '→' && d.left.kind === 'name') exact.add(d.left.name);
   }
 
+  void seed; // the carriers are the same for every seed
   const carriers: Record<string, Value[]> = {};
   for (const set of an.givenSets) {
-    const rng = makeRng(seed, `carrier:${set}`);
     const req = required.get(set) ?? new Set<string>();
     const pool = cleanPool(spec, set);
     if (pool.length) {
-      let chosen: Set<string>;
-      if (exact.has(set) && req.size) chosen = new Set(req);
-      else {
-        const k = Math.min(pool.length, 4 + rng.int(3));
-        const others = pool.filter((n) => !req.has(n));
-        chosen = new Set([...req, ...rng.sample(others, k - req.size)]);
-      }
+      // a fixed total function X → Y fixes the carrier of X to exactly its domain
+      const chosen = exact.has(set) && req.size ? req : new Set(pool);
       carriers[set] = pool.flatMap((n, i) => (chosen.has(n) ? [atom(set, n, i)] : []));
     } else {
       const lower = set.toLowerCase();
@@ -193,7 +192,7 @@ function termToValue(t: Term, type: ZType, spec: SpecDoc, atoms: { set: string; 
   }
 }
 
-function prepare(spec: SpecDoc, an: Analysis, seed: number): Prepared {
+function prepare(spec: SpecDoc, an: Analysis, seed: number, budgetMs = BUDGET): Prepared {
   const start = now();
   const { u, fixedRaw } = buildUniverse(spec, an, seed);
   const fixed = new Map<string, Value>();
@@ -204,7 +203,7 @@ function prepare(spec: SpecDoc, an: Analysis, seed: number): Prepared {
       /* ignore unusable fixed data */
     }
   }
-  return { u, fixed, givens: new Set(an.givenSets), deadline: start + BUDGET, consts: specConstants(an) };
+  return { u, fixed, givens: new Set(an.givenSets), deadline: start + budgetMs, budget: budgetMs, consts: specConstants(an) };
 }
 
 // ── shared helpers ─────────────────────────────────────────────────────────────
@@ -257,30 +256,60 @@ function shown(name: string, value: Value | undefined, extra: Partial<ShownVar> 
   return { name, value: v, text: printValue(v), ...extra };
 }
 
+/** For checks that are undefined: the reason in terms of the spec (`cleared(a₁) is undefined when a₁ ∉ dom cleared`). */
+const generalOf = new WeakMap<PredCheck, string>();
+
 function check(p: PredInfo, env: ReadonlyMap<string, Value>, u: Universe): PredCheck {
-  const { result, message, bounded } = truth(p.term, new Map(env), u);
+  const { result, message, general, bounded } = truth(p.term, new Map(env), u);
   const c: PredCheck = { origin: p.origin, text: printTerm(p.term), result };
   if (bounded) c.bounded = true;
   if (p.section) c.section = p.section;
   if (p.index !== undefined) c.index = p.index;
   if (message) c.message = message;
+  if (general) generalOf.set(c, general);
   return c;
+}
+
+/**
+ * A "no example found" message; if a failing predicate is undefined in the best try,
+ * with the reason, which is often the cause (an unguarded f(x)).
+ */
+function why(base: string, failed: readonly PredCheck[]): string {
+  for (const c of failed) {
+    const g = c.result === 'undefined' ? generalOf.get(c) : undefined;
+    if (g) return `${base.replace(/\.$/, '')}: ${g}.`;
+  }
+  return base;
 }
 
 const q = (s: string) => `‘${s}’`;
 
+/**
+ * Status of a value from the search for another one: 'computed' / 'unchanged' only
+ * when the predicates are known to fix it, 'free' with another possible value, and
+ * 'chosen' when neither was established (e.g. no time left).
+ */
+function statusFrom(w: Value | 'unique' | 'unknown', same: boolean): Partial<ShownVar> {
+  if (w === 'unique') return { status: same ? 'unchanged' : 'computed' };
+  if (w === 'unknown') return { status: 'chosen' };
+  return { status: 'free', alternative: printValue(w), alternativeValue: w };
+}
+
+/** Deadline of one search for another value (a share of the budget, so that one variable cannot use it all). */
+const witnessDeadline = (prep: Prepared) => Math.min(prep.deadline, now() + prep.budget * 0.15);
+
 // ── state and initial state ────────────────────────────────────────────────────
 
 /** A state satisfying the invariant (fixed data from spec.fixed where possible). */
-export function exampleState(spec: SpecDoc, an: Analysis, seed: number): StateExample {
+export function exampleState(spec: SpecDoc, an: Analysis, seed: number, search?: SearchOptions): StateExample {
   return guard(
-    () => stateExample(spec, an, seed),
+    () => stateExample(spec, an, seed, search),
     () => ({ kind: 'state', ok: false, message: NO_EXAMPLE }),
   );
 }
 
-function stateExample(spec: SpecDoc, an: Analysis, seed: number): StateExample {
-  const prep = prepare(spec, an, seed);
+function stateExample(spec: SpecDoc, an: Analysis, seed: number, search?: SearchOptions): StateExample {
+  const prep = prepare(spec, an, seed, search?.budgetMs);
   const st = stateSchema(an);
   if (!st) return { kind: 'state', ok: true, vars: [], checks: [] };
   return schemaExample(prep, st, makeRng(seed, 'state'), {
@@ -288,6 +317,7 @@ function stateExample(spec: SpecDoc, an: Analysis, seed: number): StateExample {
     statuses: false,
     fixedName: (v) => (v.role === 'state' ? v.base : null),
     fail: NOT_FOUND,
+    search,
   });
 }
 
@@ -295,23 +325,25 @@ function stateExample(spec: SpecDoc, an: Analysis, seed: number): StateExample {
  * The initial state: the variables of the Init schema (state imported with or without ′).
  * Like an after-state, each value is 'computed' or 'free' (Init does not fix it).
  */
-export function exampleInit(spec: SpecDoc, an: Analysis, seed: number): StateExample {
+export function exampleInit(spec: SpecDoc, an: Analysis, seed: number, search?: SearchOptions): StateExample {
   return guard(
-    () => initExample(spec, an, seed),
+    () => initExample(spec, an, seed, search),
     () => ({ kind: 'state', ok: false, message: NO_EXAMPLE }),
   );
 }
 
-function initExample(spec: SpecDoc, an: Analysis, seed: number): StateExample {
-  const prep = prepare(spec, an, seed);
+function initExample(spec: SpecDoc, an: Analysis, seed: number, search?: SearchOptions): StateExample {
+  const prep = prepare(spec, an, seed, search?.budgetMs);
   const init = an.schemas.find((s) => s.role === 'init');
   if (!init) return { kind: 'state', ok: false, message: 'There is no Init schema.' };
   if (!init.initImport) return { kind: 'state', ok: false, message: 'Init does not import the state yet.' };
   return schemaExample(prep, init, makeRng(seed, 'init'), {
     penalizeEmpty: false,
-    statuses: true,
+    startEmpty: true, // initial states are usually (mostly) empty
+    statuses: !(search?.extra || search?.relaxed),
     fixedName: (v) => (v.role === 'state' || v.role === 'state′' ? v.base : null),
     fail: 'No initial state found with small values.',
+    search,
   });
 }
 
@@ -319,12 +351,26 @@ function schemaExample(
   prep: Prepared,
   schema: SchemaInfo,
   rng: Rng,
-  opts: { penalizeEmpty: boolean; statuses: boolean; fixedName: (v: VarInfo) => string | null; fail: string },
+  opts: {
+    penalizeEmpty: boolean;
+    startEmpty?: boolean;
+    statuses: boolean;
+    fixedName: (v: VarInfo) => string | null;
+    fail: string;
+    search?: SearchOptions;
+  },
 ): StateExample {
   const vars = usableVars(schema, prep);
-  const preds = usablePreds(schema.preds, vars, prep);
+  const all = usablePreds(schema.preds, vars, prep);
+  const preds = opts.search?.relaxed ? relaxedOnly(all) : all;
   let problem: Problem | null = null;
-  const { res, fixedNames } = withFixed(prep, (useFixed) => {
+  const fixedVals = new Map<string, Value>();
+  for (const v of vars) {
+    const base = opts.fixedName(v.info);
+    const fx = base !== null ? prep.fixed.get(base) : undefined;
+    if (fx) fixedVals.set(v.info.name, fx);
+  }
+  const { res, fixedNames } = withFixed(true, fixedFits(prep, preds, fixedVals), (useFixed) => {
     const known = new Map<string, Value>();
     const fixedNames = new Set<string>();
     const unknowns: Unknown[] = [];
@@ -338,13 +384,12 @@ function schemaExample(
       }
       unknowns.push({
         ...unknownOf(v),
-        initValue: fx,
-        initProb: fx ? 0.9 : undefined,
+        ...(fx ? { initValue: fx, initProb: 0.9 } : opts.startEmpty ? { initValue: emptyValue(v.dom) ?? undefined, initProb: 0.85 } : {}),
         penalizeEmpty: opts.penalizeEmpty,
       });
     }
-    const pr: Problem = { u: prep.u, known, unknowns, cons: preds.map((p) => hard(p)) };
-    const res = solve(pr, rng, { maxSteps: 3000, deadline: prep.deadline, softSteps: 40 });
+    const pr: Problem = { u: prep.u, known, unknowns, cons: [...preds.map((p) => hard(p)), ...extraCons(opts.search)] };
+    const res = solve(pr, rng, { maxSteps: 3000, deadline: prep.deadline, softSteps: opts.search ? 0 : 40 });
     if (res.ok || !problem) problem = pr;
     return { res, fixedNames };
   });
@@ -352,28 +397,51 @@ function schemaExample(
   const statusOf = (name: string): Partial<ShownVar> => {
     if (fixedNames.has(name)) return { fixed: true };
     if (!plan || !problem) return {};
-    if (!isDetermined(plan, name) && now() < prep.deadline) {
-      const w = findWitness(problem, name, res.env, rng, prep.deadline);
-      if (w) return { status: 'free', alternative: printValue(w), alternativeValue: w };
-    }
-    return { status: 'computed' };
+    if (isDetermined(plan, name)) return { status: 'computed' };
+    return statusFrom(findWitness(problem, name, res.env, rng, witnessDeadline(prep)), false);
   };
   const shownVars = vars.map((v) => shown(v.info.name, res.env.get(v.info.name), statusOf(v.info.name)));
   const checks = preds.map((p) => check(p, res.env, prep.u));
   if (res.ok) return { kind: 'state', ok: true, vars: shownVars, checks };
-  return { kind: 'state', ok: false, message: opts.fail, best: { vars: shownVars, failed: checks.filter((c) => c.result !== true) } };
+  const failed = checks.filter((c) => c.result !== true);
+  return { kind: 'state', ok: false, message: why(opts.fail, failed), best: { vars: shownVars, failed } };
 }
 
 function unknownOf(v: UVar): Unknown {
   return { name: v.info.name, dom: v.dom, declared: v.info.declared, rank: RANK[v.info.role] };
 }
 
-/** Try with fixed data first; if that fails, again with fixed data only as a starting point. */
-function withFixed<T extends { res: SolveResult; fixedNames: Set<string> }>(prep: Prepared, attempt: (useFixed: boolean) => T): T {
+/**
+ * Try with fixed data first. Only if the fixed data cannot work — it breaks a predicate
+ * about the fixed variables alone (`fits` false), or the search with it ran all its
+ * steps without success — try again (if `retry`) with fixed data only as a starting
+ * point. Running out of time is no reason to drop fixed data: then the example fails
+ * rather than showing made-up values instead of, e.g., a compatibility table.
+ */
+function withFixed<T extends { res: SolveResult; fixedNames: Set<string> }>(
+  retry: boolean,
+  fits: boolean,
+  attempt: (useFixed: boolean) => T,
+): T {
+  if (retry && !fits) return attempt(false);
   const first = attempt(true);
-  if (first.res.ok || !first.fixedNames.size || now() > prep.deadline) return first;
+  if (first.res.ok || !retry || !first.fixedNames.size || first.res.timedOut) return first;
   const second = attempt(false);
   return second.res.ok ? second : first;
+}
+
+/** Do the fixed values satisfy the predicates that mention only fixed variables (and given sets)? */
+function fixedFits(prep: Prepared, preds: PredInfo[], fixedVals: ReadonlyMap<string, Value>): boolean {
+  if (!fixedVals.size) return true;
+  return preds.every((p) => {
+    const fv = [...freeVars(p.term)];
+    if (!fv.some((n) => fixedVals.has(n)) || !fv.every((n) => fixedVals.has(n) || prep.givens.has(n))) return true;
+    try {
+      return evalPred(p.term, fixedVals, prep.u);
+    } catch {
+      return false;
+    }
+  });
 }
 
 // ── operations ─────────────────────────────────────────────────────────────────
@@ -390,6 +458,10 @@ interface OpParts {
   inv: PredInfo[];
   /** Explicit preconditions: own predicates without after-state / outputs. */
   pres: PredInfo[];
+  /** Extra constraints of a targeted search. */
+  extra: Con[];
+  /** Targeted search: no statuses, no failure diagnosis. */
+  quick: boolean;
 }
 
 /**
@@ -398,19 +470,66 @@ interface OpParts {
  * (statuses say whether each is computed, unchanged, or not determined by the spec).
  * 'blocked': a valid before-state and inputs for which a precondition is false.
  */
-export function exampleOperation(spec: SpecDoc, an: Analysis, opId: string, seed: number, mode: 'applicable' | 'blocked'): OpExample {
+/**
+ * Options for targeted searches (used by the goal checker): find a valid example that
+ * also satisfies `extra`. In this mode no statuses or failure diagnosis are computed.
+ */
+export interface SearchOptions {
+  /** An extra predicate the example must satisfy (in the spec's own names). */
+  extra?: Term;
+  /** Only the schema's own lines and Ξ: without the state invariant and the frame convention. */
+  relaxed?: boolean;
+  /** Time budget in ms (default: the normal example budget). */
+  budgetMs?: number;
+}
+
+/** Predicates a relaxed search keeps: the schema's own lines and Ξ's v′ = v. */
+const relaxedOnly = (preds: PredInfo[]) => preds.filter((p) => p.origin === 'own' || p.origin === 'xi');
+
+/** The extra predicate of a search as a hard constraint. */
+const extraCons = (search?: SearchOptions): Con[] => (search?.extra ? [{ term: search.extra, hard: true, weight: 1 }] : []);
+
+export interface OpExampleOptions extends SearchOptions {
+  /**
+   * The before-state to use: the unprimed state variables of the current state
+   * example, by name. Only the inputs, after-state and outputs then vary with the seed.
+   * Variables it lacks (or whose value no longer fits the declaration) are generated
+   * to fit the invariant; if the state no longer fits the spec at all, a fresh one is
+   * used (`freshBefore`).
+   */
+  before?: Readonly<Record<string, Value>>;
+}
+
+export function exampleOperation(
+  spec: SpecDoc,
+  an: Analysis,
+  opId: string,
+  seed: number,
+  mode: 'applicable' | 'blocked',
+  opts: OpExampleOptions = {},
+): OpExample {
   return guard(
-    () => operationExample(spec, an, opId, seed, mode),
+    () => operationExample(spec, an, opId, seed, mode, opts.before, opts),
     () => ({ kind: 'op', ok: false, reason: mode === 'blocked' ? 'no-blocked' : 'no-input', message: NO_EXAMPLE }),
   );
 }
 
-function operationExample(spec: SpecDoc, an: Analysis, opId: string, seed: number, mode: 'applicable' | 'blocked'): OpExample {
-  const prep = prepare(spec, an, seed);
+function operationExample(
+  spec: SpecDoc,
+  an: Analysis,
+  opId: string,
+  seed: number,
+  mode: 'applicable' | 'blocked',
+  given?: Readonly<Record<string, Value>>,
+  search?: SearchOptions,
+): OpExample {
+  const prep = prepare(spec, an, seed, search?.budgetMs);
   const op = an.byId[opId];
   if (!op || op.role !== 'operation') return { kind: 'op', ok: false, reason: 'no-input', message: 'Unknown operation.' };
   const vars = usableVars(op, prep);
-  const preds = usablePreds(op.preds, vars, prep);
+  const all = usablePreds(op.preds, vars, prep);
+  const preds = search?.relaxed ? relaxedOnly(all) : all;
+  const quick = !!(search?.extra || search?.relaxed);
   const role = (...roles: VarInfo['role'][]) => vars.filter((v) => roles.includes(v.info.role));
   const before = role('state');
   const inputs = role('input');
@@ -425,9 +544,74 @@ function operationExample(spec: SpecDoc, an: Analysis, opId: string, seed: numbe
     preds,
     inv: preds.filter((p) => p.origin === 'invariant'),
     pres: preds.filter((p) => p.origin === 'own' && [...freeVars(p.term)].every((n) => phaseA.has(n) || prep.givens.has(n))),
+    extra: extraCons(search),
+    quick,
   };
-  const rng = makeRng(seed, `op:${opId}:${mode}`);
-  return mode === 'blocked' ? blockedCase(parts, rng) : applicableCase(parts, rng);
+  const run = (src: BeforeSource) =>
+    mode === 'blocked' ? blockedCase(parts, makeRng(seed, `op:${opId}:${mode}`), src) : applicableCase(parts, makeRng(seed, `op:${opId}:${mode}`), src);
+  if (given) {
+    const r = run(givenBefore(parts, given));
+    if (r) return r;
+    // the given state does not fit the spec any more: use a fresh one
+    const fresh = run(searchedBefore(parts))!;
+    return fresh.ok ? { ...fresh, freshBefore: true } : fresh;
+  }
+  return run(searchedBefore(parts))!;
+}
+
+/**
+ * Where an operation's before-state comes from. `vars` puts the known before values
+ * into `known` (names of fixed data into `fixedNames`) and returns the before
+ * variables still to be searched.
+ */
+interface BeforeSource {
+  given: boolean;
+  vars(useFixed: boolean, known: Map<string, Value>, fixedNames: Set<string>): Unknown[];
+}
+
+/** A before-state found by the search (fixed data first). */
+const searchedBefore = (x: OpParts): BeforeSource => ({
+  given: false,
+  vars: (useFixed, known, fixedNames) => beforeUnknowns(x, useFixed, known, fixedNames),
+});
+
+/** The caller's before-state; variables it lacks or whose value no longer fits are searched. */
+function givenBefore(x: OpParts, given: Readonly<Record<string, Value>>): BeforeSource {
+  return {
+    given: true,
+    vars: (_useFixed, known, fixedNames) => {
+      const missing: Unknown[] = [];
+      for (const v of x.before) {
+        const val = Object.prototype.hasOwnProperty.call(given, v.info.name) ? given[v.info.name] : undefined;
+        let fits = false;
+        try {
+          fits = !!val && memberOfDeclared(val, v.info.declared, new Map(), x.prep.u);
+        } catch {
+          fits = false;
+        }
+        if (!fits) {
+          missing.push({ ...unknownOf(v), penalizeEmpty: true });
+          continue;
+        }
+        known.set(v.info.name, val!);
+        const fx = x.prep.fixed.get(v.info.base);
+        if (fx && valueEquals(fx, val!)) fixedNames.add(v.info.name);
+      }
+      return missing;
+    },
+  };
+}
+
+/** Can the given before-state (with its missing variables searched) satisfy the invariant? */
+function stateFits(x: OpParts, src: BeforeSource, rng: Rng): boolean {
+  const known = new Map<string, Value>();
+  const unknowns = src.vars(true, known, new Set());
+  const res = solve({ u: x.prep.u, known, unknowns, cons: x.inv.map((p) => hard(p)) }, rng, {
+    maxSteps: 800,
+    deadline: Math.min(x.prep.deadline, now() + x.prep.budget * 0.2),
+    softSteps: 0,
+  });
+  return res.ok;
 }
 
 /** Before-state variables: fixed data as known values (or as a start value only). */
@@ -438,7 +622,19 @@ function beforeUnknowns(x: OpParts, useFixed: boolean, known: Map<string, Value>
     if (fx && useFixed) {
       known.set(v.info.name, fx);
       fixedNames.add(v.info.name);
-    } else out.push({ ...unknownOf(v), initValue: fx, initProb: fx ? 0.9 : undefined, penalizeEmpty: true });
+    } else if (fx) out.push({ ...unknownOf(v), initValue: fx, initProb: 0.9, penalizeEmpty: true });
+    // sometimes start from the empty state: helps invariants like "outside S, f(x) = ∅"
+    else out.push({ ...unknownOf(v), initValue: emptyValue(v.dom) ?? undefined, initProb: 0.3, penalizeEmpty: true });
+  }
+  return out;
+}
+
+/** The fixed values of the before-state, by variable name. */
+function beforeFixed(x: OpParts): Map<string, Value> {
+  const out = new Map<string, Value>();
+  for (const v of x.before) {
+    const fx = x.prep.fixed.get(v.info.base);
+    if (fx) out.set(v.info.name, fx);
   }
   return out;
 }
@@ -448,30 +644,33 @@ const afterUnknowns = (x: OpParts): Unknown[] => [
   ...x.outputs.map(unknownOf),
 ];
 
-function applicableCase(x: OpParts, rng: Rng): OpExample {
+/** The applicable case; null if the given before-state does not fit the spec. */
+function applicableCase(x: OpParts, rng: Rng, src: BeforeSource): OpExample | null {
   const { prep } = x;
-  const jointDeadline = Math.min(prep.deadline, now() + BUDGET * 0.6);
-  const joint = withFixed(prep, (useFixed) => {
+  const jointDeadline = Math.min(prep.deadline, now() + prep.budget * 0.6);
+  const fits = fixedFits(prep, x.preds, beforeFixed(x));
+  const joint = withFixed(!src.given, fits, (useFixed) => {
     const known = new Map<string, Value>();
     const fixedNames = new Set<string>();
-    const unknowns = [...beforeUnknowns(x, useFixed, known, fixedNames), ...x.inputs.map(unknownOf), ...afterUnknowns(x)];
-    const problem: Problem = { u: prep.u, known, unknowns, cons: x.preds.map((p) => hard(p)) };
-    const change = changePreference(x, problem);
+    const unknowns = [...src.vars(useFixed, known, fixedNames), ...x.inputs.map(unknownOf), ...afterUnknowns(x)];
+    const problem: Problem = { u: prep.u, known, unknowns, cons: [...x.preds.map((p) => hard(p)), ...x.extra] };
+    const change = x.quick ? null : changePreference(x, problem);
     if (change) problem.cons.push(change);
-    const res = solve(problem, rng, { maxSteps: 2500, deadline: jointDeadline, softSteps: 40 });
+    const res = solve(problem, rng, { maxSteps: 2500, deadline: x.quick ? prep.deadline : jointDeadline, softSteps: x.quick ? 0 : 40 });
     return { res, fixedNames };
   });
   if (joint.res.ok) return applicableResult(x, joint.res.env, joint.fixedNames, rng);
+  if (x.quick) return { kind: 'op', ok: false, reason: 'no-input', message: NOT_FOUND };
 
   // Diagnose: is there a valid before-state + inputs at all? (invariant first)
-  const phaseA = withFixed(prep, (useFixed) => {
+  const phaseA = withFixed(!src.given, fits, (useFixed) => {
     const known = new Map<string, Value>();
     const fixedNames = new Set<string>();
-    const unknowns = [...beforeUnknowns(x, useFixed, known, fixedNames), ...x.inputs.map(unknownOf)];
+    const unknowns = [...src.vars(useFixed, known, fixedNames), ...x.inputs.map(unknownOf)];
     const cons = [...x.inv.map((p) => hard(p, 5)), ...x.pres.map((p) => hard(p))];
     const res = solve({ u: prep.u, known, unknowns, cons }, rng, {
       maxSteps: 1500,
-      deadline: Math.min(prep.deadline, now() + BUDGET * 0.2),
+      deadline: Math.min(prep.deadline, now() + prep.budget * 0.2),
       softSteps: 20,
     });
     return { res, fixedNames };
@@ -481,24 +680,32 @@ function applicableCase(x: OpParts, rng: Rng): OpExample {
   const inputsShown = () => x.inputs.map((v) => shown(v.info.name, A.env.get(v.info.name)));
   if (!A.ok) {
     const failed = A.violated.map(tagOf);
-    const invBad = failed.filter((p) => p.origin === 'invariant');
-    if (invBad.length || !x.pres.length) {
+    if (src.given) {
+      if (!stateFits(x, src, rng)) return null;
       return {
         kind: 'op',
         ok: false,
-        reason: 'no-before',
-        message: 'No example state found with small values.',
-        failed: invBad.map((p) => check(p, A.env, prep.u)),
+        reason: 'no-input-for-state',
+        message: `No input meets the precondition${x.pres.length > 1 ? 's' : ''} in this example state — try a new example state.`,
+        before: beforeShown(),
+        inputs: inputsShown(),
+        failed: failed.filter((p) => p.origin !== 'invariant').map((p) => check(p, A.env, prep.u)),
       };
     }
+    const invBad = failed.filter((p) => p.origin === 'invariant');
+    if (invBad.length || !x.pres.length) {
+      const checks = invBad.map((p) => check(p, A.env, prep.u));
+      return { kind: 'op', ok: false, reason: 'no-before', message: why('No example state found with small values.', checks), failed: checks };
+    }
+    const checks = failed.map((p) => check(p, A.env, prep.u));
     return {
       kind: 'op',
       ok: false,
       reason: 'no-input',
-      message: `No example found with small values in which the precondition${x.pres.length > 1 ? 's hold' : ' holds'}.`,
+      message: why(`No example found with small values in which the precondition${x.pres.length > 1 ? 's hold' : ' holds'}.`, checks),
       before: beforeShown(),
       inputs: inputsShown(),
-      failed: failed.map((p) => check(p, A.env, prep.u)),
+      failed: checks,
     };
   }
 
@@ -517,9 +724,21 @@ function applicableCase(x: OpParts, rng: Rng): OpExample {
   const failedPreds = B.violated.map(tagOf);
   const broken = failedPreds.find((p) => p.origin === 'invariant′');
   const xi = failedPreds.find((p) => p.origin === 'xi');
+  const frame = failedPreds.find((p) => p.origin === 'frame');
+  // frame lines (v′ = v) in the broken invariant: to blame if dropping them lets it hold
+  const frames = broken && !xi && !frame ? framesIn(x.op, broken.term) : [];
+  const unframed =
+    frames.length > 0 &&
+    solve(
+      { u: prep.u, known: A.env, unknowns: afterUnknowns(x), cons: x.preds.filter((p) => !frames.includes(p) && mentionsAny(p, [...x.after, ...x.outputs])).map((p) => hard(p)) },
+      rng,
+      { maxSteps: 1500, deadline: Math.max(prep.deadline, now() + prep.budget * 0.15), softSteps: 0 },
+    ).ok;
   let message: string;
-  // (only the Ξ conflict is certain; otherwise larger values might still work)
+  // (only the Ξ / frame conflicts are certain; otherwise larger values might still work)
   if (xi) message = `No after-state fits: Ξ keeps ${q(printTerm(xi.term))}.`;
+  else if (frame && frame.term.kind === 'rel') message = frameConflictMessage(x.op.name, [frame]);
+  else if (unframed) message = frameConflictMessage(x.op.name, frames);
   else if (broken) message = `No after-state found with small values: ${q(printTerm(broken.term))} fails.`;
   else if (failedPreds.length) message = `No after-state found with small values: ${q(printTerm(failedPreds[0].term))} fails.`;
   else if (B.badDecls.length) {
@@ -528,6 +747,8 @@ function applicableCase(x: OpParts, rng: Rng): OpExample {
       ? `No after-state found with small values: ${v.info.name} would not be in ${printTerm(v.info.declared)}.`
       : 'No after-state found with small values.';
   } else message = 'No after-state found with small values.';
+  const failedChecks = failedPreds.map((p) => check(p, B.env, prep.u));
+  if (!xi && !frame) message = why('No after-state found with small values.', failedChecks.slice(0, 1)) === 'No after-state found with small values.' ? message : why('No after-state found with small values.', failedChecks.slice(0, 1));
   return {
     kind: 'op',
     ok: false,
@@ -535,7 +756,7 @@ function applicableCase(x: OpParts, rng: Rng): OpExample {
     message,
     before: beforeShown(),
     inputs: inputsShown(),
-    failed: failedPreds.map((p) => check(p, B.env, prep.u)),
+    failed: failedChecks,
   };
 }
 
@@ -580,14 +801,13 @@ function applicableResult(x: OpParts, env: Map<string, Value>, fixedNames: Set<s
   };
   const plan = buildPlan(problem);
   const statusOf = (v: UVar, isAfter: boolean): Partial<ShownVar> => {
+    if (x.quick) return {}; // (targeted searches need no statuses)
     const name = v.info.name;
-    if (!isDetermined(plan, name) && now() < prep.deadline) {
-      const w = findWitness(problem, name, env, rng, prep.deadline);
-      if (w) return { status: 'free', alternative: printValue(w), alternativeValue: w };
-    }
     const val = env.get(name);
     const old = env.get(v.info.base);
-    return { status: isAfter && val && old && valueEquals(val, old) ? 'unchanged' : 'computed' };
+    const same = isAfter && !!val && !!old && valueEquals(val, old);
+    if (isDetermined(plan, name)) return { status: same ? 'unchanged' : 'computed' };
+    return statusFrom(findWitness(problem, name, env, rng, witnessDeadline(prep)), same);
   };
   return {
     kind: 'op',
@@ -601,45 +821,203 @@ function applicableResult(x: OpParts, env: Map<string, Value>, fixedNames: Set<s
   };
 }
 
-function blockedCase(x: OpParts, rng: Rng): OpExample {
+/**
+ * The blocked case; null if the given before-state does not fit the spec.
+ *
+ * In Z an operation is blocked in a before-state with inputs when no after-state and
+ * outputs satisfy its predicates (pre Op = ∃ State′; outputs! . Op). Two ways to find
+ * such a case, both certain: an explicit precondition (a line about the before-state and
+ * inputs only) is false; or the predicates compute the after-state (prescribed′ =
+ * prescribed ∪ {p? ↦ drug?}, v′ = v, …) and it breaks a predicate, typically the
+ * invariant after (so p? ∉ patients blocks Prescribe even if no line says p? ∈ patients).
+ */
+function blockedCase(x: OpParts, rng: Rng, src: BeforeSource): OpExample | null {
   const { prep, pres } = x;
-  if (!pres.length) {
+  if (neverBlocked(x)) {
     const name = x.op.name || 'This operation';
     return { kind: 'op', ok: false, reason: 'no-blocked', message: `${name} has no precondition, so it is never blocked.` };
   }
-  const start = rng.int(pres.length);
+  const fits = fixedFits(prep, x.preds, beforeFixed(x));
+  const tester = blockedTester(x, rng);
+  const shares = pres.length + (tester ? 1 : 0);
+  /** Search a valid before-state + inputs that also satisfy `cons`. */
+  const search = (cons: Con[], deadline: number, maxSteps: number) =>
+    withFixed(!src.given, fits, (useFixed) => {
+      const known = new Map<string, Value>();
+      const fixedNames = new Set<string>();
+      const unknowns = [...src.vars(useFixed, known, fixedNames), ...x.inputs.map(unknownOf)];
+      const res = solve({ u: prep.u, known, unknowns, cons: [...x.inv.map((p) => hard(p)), ...cons] }, rng, {
+        maxSteps,
+        deadline,
+        softSteps: 30,
+      });
+      return { res, fixedNames };
+    });
+  const result = (env: Map<string, Value>, fixedNames: Set<string>, failed: PredCheck[]): OpExample => ({
+    kind: 'op',
+    ok: true,
+    status: 'blocked',
+    before: x.before.map((v) => shown(v.info.name, env.get(v.info.name), fixedNames.has(v.info.name) ? { fixed: true } : {})),
+    inputs: x.inputs.map((v) => shown(v.info.name, env.get(v.info.name))),
+    after: [],
+    outputs: [],
+    checks: x.preds.filter((p) => p.origin === 'invariant' || pres.includes(p)).map((p) => check(p, env, prep.u)),
+    failed,
+  });
+
+  // an explicit precondition is false
+  const start = rng.int(Math.max(1, pres.length));
   for (let k = 0; k < pres.length; k++) {
     if (now() > prep.deadline) break;
     const target = pres[(start + k) % pres.length];
     const others = pres.filter((p) => p !== target);
     const negated: Term = { kind: 'not', arg: target.term, span: target.term.span };
-    const share = Math.min(prep.deadline, now() + BUDGET / pres.length);
-    const { res, fixedNames } = withFixed(prep, (useFixed) => {
-      const known = new Map<string, Value>();
-      const fixedNames = new Set<string>();
-      const unknowns = [...beforeUnknowns(x, useFixed, known, fixedNames), ...x.inputs.map(unknownOf)];
-      const cons: Con[] = [
-        ...x.inv.map((p) => hard(p)),
-        { term: negated, hard: true, weight: 1, tag: target },
-        ...others.map((p) => ({ term: p.term, hard: false, weight: 0.3, tag: p })),
-      ];
-      const res = solve({ u: prep.u, known, unknowns, cons }, rng, { maxSteps: 1200, deadline: share, softSteps: 30 });
-      return { res, fixedNames };
-    });
-    if (!res.ok) continue;
-    const env = res.env;
-    const shownPreds = x.preds.filter((p) => p.origin === 'invariant' || pres.includes(p));
-    return {
-      kind: 'op',
-      ok: true,
-      status: 'blocked',
-      before: x.before.map((v) => shown(v.info.name, env.get(v.info.name), fixedNames.has(v.info.name) ? { fixed: true } : {})),
-      inputs: x.inputs.map((v) => shown(v.info.name, env.get(v.info.name))),
-      after: [],
-      outputs: [],
-      checks: shownPreds.map((p) => check(p, env, prep.u)),
-      failed: pres.map((p) => check(p, env, prep.u)).filter((c) => c.result !== true),
-    };
+    const share = Math.min(prep.deadline, now() + prep.budget / shares);
+    const { res, fixedNames } = search(
+      [{ term: negated, hard: true, weight: 1, tag: target }, ...others.map((p) => ({ term: p.term, hard: false, weight: 0.3, tag: p }))],
+      share,
+      1200,
+    );
+    if (res.ok) return result(res.env, fixedNames, pres.map((p) => check(p, res.env, prep.u)).filter((c) => c.result !== true));
   }
-  return { kind: 'op', ok: false, reason: 'no-blocked', message: 'No blocked case found with small values.' };
+
+  // the after-state the predicates compute breaks a predicate
+  if (tester && now() <= prep.deadline) {
+    const reads = [...x.before, ...x.inputs].map((v) => v.info.name);
+    const blockedCon: Con = {
+      term: { kind: 'bool', value: true, span: { from: 0, to: 0 } },
+      hard: true,
+      weight: 1,
+      test: { reads, dist: (env) => (tester(env)?.blocked ? 0 : 1) },
+    };
+    // (the explicit preconditions hold: the case shows a different reason)
+    // (a blocked case of this kind is usually easy to hit: few steps, so that operations
+    // that are never blocked do not take the whole budget)
+    const { res, fixedNames } = search([blockedCon, ...pres.map((p) => ({ term: p.term, hard: false, weight: 0.3, tag: p }))], prep.deadline, 400);
+    const t = res.ok ? tester(res.env) : null;
+    if (t?.blocked && t.after) {
+      const all = new Map([...t.after, ...res.env]);
+      return result(res.env, fixedNames, (t.failed ?? []).map((p) => check(p, all, prep.u)).filter((c) => c.result !== true));
+    }
+  }
+
+  if (src.given) {
+    if (!stateFits(x, src, rng)) return null;
+    return { kind: 'op', ok: false, reason: 'no-blocked', message: 'No input is blocked in this example state — try a new example state.' };
+  }
+  return { kind: 'op', ok: false, reason: 'no-blocked', message: 'No blocked case found.' };
+}
+
+/** The search problem of the after-state and outputs, given the before-state and inputs (`known`). */
+function afterProblem(x: OpParts, known: ReadonlyMap<string, Value>): Problem {
+  const outs = [...x.after, ...x.outputs];
+  return {
+    u: x.prep.u,
+    known,
+    unknowns: [...x.after.map(unknownOf), ...x.outputs.map(unknownOf)],
+    cons: x.preds.filter((p) => mentionsAny(p, outs)).map((p) => hard(p)),
+  };
+}
+
+/**
+ * Decides whether the operation is blocked in a before-state with inputs, when that is
+ * certain here: the predicates compute the after-state and outputs (definitions
+ * v′ = e), apart from values with a few possible values each (all tried). Then
+ * blocked means: the computed after-state breaks a predicate (`failed`, with the
+ * after values in `after`). Null if the operation is not of this kind.
+ */
+function blockedTester(
+  x: OpParts,
+  rng: Rng,
+): ((env: ReadonlyMap<string, Value>) => { blocked: boolean; after?: Map<string, Value>; failed?: PredInfo[] } | null) | null {
+  if (!x.after.length && !x.outputs.length) return null;
+  const problem = afterProblem(x, new Map());
+  const plan = buildPlan(problem);
+  const cands = plan.roots.map((r) => completeEnum(problem.unknowns[r].dom));
+  if (cands.some((c) => !c) || cands.reduce((n, c) => n * c!.length, 1) > 64) return null;
+  return (env) => {
+    const s = new Search({ ...plan, p: { ...problem, known: env } }, rng);
+    const first = s.run({ maxSteps: 0, deadline: Infinity, softSteps: 0 }); // computes the definitions
+    if (first.ok) return { blocked: false };
+    const failed = first.violated.map(tagOf);
+    if (!plan.roots.length) return { blocked: true, after: first.env, failed };
+    const r = s.exhaust(plan.roots, cands as Value[][], first.env, Infinity);
+    if (r === 'none') return { blocked: true, after: first.env, failed };
+    return r === 'timeout' ? null : { blocked: false };
+  };
+}
+
+/**
+ * Is it certain that the operation is never blocked? Only claimed in a simple case: no
+ * explicit precondition, every after-state and output value is computed by a total
+ * expression (no f(x), no div) and lies in its declared set whatever it is, and the
+ * only other predicates about them are the invariant after on unchanged variables.
+ */
+function neverBlocked(x: OpParts): boolean {
+  if (x.pres.length) return false;
+  const outs = [...x.after, ...x.outputs];
+  const problem = afterProblem(x, new Map());
+  const plan = buildPlan(problem);
+  const unchanged = new Set<string>();
+  const defs = new Set<Term>();
+  for (const v of outs) {
+    const i = plan.idx.get(v.info.name);
+    const def = i === undefined ? null : plan.defs[i];
+    if (!def) {
+      // a value no predicate mentions can be anything in its set
+      if (problem.cons.some((c) => freeVars(c.term).has(v.info.name))) return false;
+      continue;
+    }
+    if (def.deps.length) return false; // computed from another after-state value
+    defs.add(def.expr);
+    if (v.info.role === 'state′' && def.expr.kind === 'name' && def.expr.name === v.info.base) unchanged.add(v.info.name);
+    else if (!totalExpr(def.expr, x.prep) || !maximalSet(v.info.declared, x.prep)) return false;
+  }
+  return problem.cons.every((c) => {
+    const p = tagOf(c);
+    const isDef = (t: Term): boolean =>
+      t.kind === 'logic' && t.op === '∧'
+        ? isDef(t.left) && isDef(t.right)
+        : t.kind === 'rel' && t.op === '=' && (defs.has(t.left) || defs.has(t.right));
+    if (isDef(p.term)) return true;
+    return p.origin === 'invariant′' && outs.every((v) => !freeVars(p.term).has(v.info.name) || unchanged.has(v.info.name));
+  });
+}
+
+/** An expression that is defined whatever the values of its names are. */
+function totalExpr(t: Term, prep: Prepared): boolean {
+  switch (t.kind) {
+    case 'name':
+      return !prep.givens.has(t.name);
+    case 'num':
+    case 'emptyset':
+      return true;
+    case 'setDisplay':
+    case 'tuple':
+      return t.elems.every((e) => totalExpr(e, prep));
+    case 'binop':
+      return ['↦', '∪', '∩', '∖', '+', '-', '*'].includes(t.op) && totalExpr(t.left, prep) && totalExpr(t.right, prep);
+    case 'unop':
+      return t.op !== 'ℙ' && totalExpr(t.arg, prep);
+    default:
+      return false;
+  }
+}
+
+/** A declared set that contains every value of its type (BOOK, ℤ, ℙ BOOK, BOOK ↔ MEMBER, …). */
+function maximalSet(t: Term, prep: Prepared): boolean {
+  switch (t.kind) {
+    case 'name':
+      return prep.givens.has(t.name);
+    case 'builtinSet':
+      return t.set === 'ℤ';
+    case 'unop':
+      return t.op === 'ℙ' && maximalSet(t.arg, prep);
+    case 'binop':
+      return t.op === '↔' && maximalSet(t.left, prep) && maximalSet(t.right, prep);
+    case 'cross':
+      return t.elems.every((e) => maximalSet(e, prep));
+    default:
+      return false;
+  }
 }

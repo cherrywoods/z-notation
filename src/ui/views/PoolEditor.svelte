@@ -4,6 +4,8 @@
   // Commas separate values (so "Dana Smith" is one value); braces typed inside are
   // dropped. A … (or ...) anywhere marks the set as infinite in principle; it is shown
   // at the end (examples still use the listed values).
+  // Layout: an invisible copy of the text with the closing brace lies under the textarea.
+  // It sizes the field and wraps like the textarea, so the brace follows the last value.
   import { explain } from '../explain/explain.svelte';
 
   interface Props {
@@ -16,15 +18,6 @@
 
   let text = $state('');
   let focused = $state(false);
-  let area = $state<HTMLTextAreaElement>();
-
-  // grow with the text (values wrap instead of being cut off)
-  $effect(() => {
-    void text;
-    if (!area) return;
-    area.style.height = 'auto';
-    area.style.height = `${area.scrollHeight}px`;
-  });
 
   const show = (vals: string[], inf: boolean) => [...vals, ...(inf ? ['…'] : [])].join(', ');
   const unique = (v: string, i: number, all: string[]) => all.indexOf(v) === i;
@@ -62,13 +55,14 @@
   >
   <span class="eq">=</span>
   <span class="set z-text"
-    ><span class="brace z-set">{'{'}</span><textarea
+    ><span class="brace z-set">{'{'}</span><span class="field"
+      ><span class="mirror" aria-hidden="true">{text + '\u200b'}<span class="brace z-set">{'}'}</span></span
+      ><textarea
       rows="1"
       spellcheck="false"
       autocomplete="off"
       aria-label={`Example values of ${name}, separated by commas; add … if there are infinitely many`}
       bind:value={text}
-      bind:this={area}
       onfocus={() => (focused = true)}
       onblur={() => {
         focused = false;
@@ -86,7 +80,8 @@
           (e.currentTarget as HTMLTextAreaElement).blur();
         }
       }}
-    ></textarea><span class="brace z-set">{'}'}</span></span
+    ></textarea></span
+    ></span
   >
 </div>
 
@@ -115,35 +110,45 @@
     align-items: flex-start;
     min-width: 0;
   }
+  .field {
+    position: relative;
+    flex: 0 1 auto;
+    min-width: 4ch;
+  }
+  /* mirror and textarea: same box, same wrapping */
+  .mirror,
   textarea {
+    box-sizing: border-box;
+    padding: 0 1px;
+    border: none;
+    border-bottom: 1px dashed transparent;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: normal;
+  }
+  .mirror {
+    display: block;
+    position: relative;
+    z-index: 1;
+    color: transparent;
+    pointer-events: none;
+    user-select: none;
+  }
+  textarea {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     font: inherit;
     line-height: inherit;
     color: var(--fg);
-    border: none;
-    border-bottom: 1px dashed transparent;
     background: transparent;
-    padding: 0 1px;
     margin: 0;
-    min-width: 4ch;
-    width: 100%;
     resize: none;
-    /* at most about six lines, then it scrolls */
-    max-height: calc(1.75em * 6);
-    overflow-x: hidden;
-    overflow-y: auto;
-    overflow-wrap: anywhere;
-    display: block;
+    overflow: hidden;
     transition:
       border-color 0.15s,
       background 0.15s;
-  }
-  /* hug the values so the closing brace follows them (where supported) */
-  @supports (field-sizing: content) {
-    textarea {
-      field-sizing: content;
-      width: auto;
-      max-width: 100%;
-    }
   }
   textarea:hover {
     border-bottom-color: var(--ui-fg-faint);

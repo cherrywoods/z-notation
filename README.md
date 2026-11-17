@@ -25,12 +25,14 @@ The site uses relative paths and hash routing, so it works under any
 
 ## Adding or changing a system
 
-Each system on the start page is one file in `templates/` (format: `docs/design.md`,
-section "Template format"). Lines marked `"hidden": true` are left for students to write;
-the schema's `prompt` tells them what is missing. `fixedValues` gives realistic example
-data for fixed tables (e.g. blood-type compatibility).
+Each system on the start page is one file in `templates/` (format: `docs/design.md`).
+Students start with empty schemas. The template's schema lines are the hidden reference
+spec that the step `goals` are checked against (independently of variable names);
+`card` is the text of the System tab, `typeOptions` lists extra types offered on the
+Types step, and `fixedValues` gives realistic fixed data (e.g. blood-type compatibility).
 
-## Hidden presentation mode
+## Hidden presenter mode
 
-Press `p` on the start page (or click the faint QR icon in the corner, or open `#/present`)
-to show a large QR code and the address, so late students can join. `Esc` closes it.
+Click the faint QR icon in a corner of the start page to switch presenter mode on: every
+page then shows a footer with a QR code and the address, so late students can join, and
+the Z text gets larger for the projector. Hover the footer and click ✕ to switch it off.

@@ -1,6 +1,6 @@
 <!--
   Routing: start page or the tutorial of a topic. Presenter mode (projector) adds the
-  join footer to every page; #/present and the key P switch it on (P toggles).
+  join footer to every page; only the faint QR icon on the start page switches it on.
 -->
 <script lang="ts">
   import { fade } from 'svelte/transition';
@@ -24,26 +24,11 @@
     else if (store.current?.topicId !== topicId) store.openTopic(topicId);
   });
 
-  // #/present switches presenter mode on and shows the start page
+  // an old #/present link just shows the start page (presenter mode: QR icon only)
   $effect.pre(() => {
-    if (route.name !== 'present') return;
-    presenter.set(true);
-    router.replace('#/');
+    if (route.name === 'present') router.replace('#/');
   });
-
-  function typing(t: EventTarget | null) {
-    const el = t as HTMLElement | null;
-    return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
-  }
-  function onkeydown(e: KeyboardEvent) {
-    if (e.key !== 'p' && e.key !== 'P') return;
-    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
-    e.preventDefault();
-    presenter.toggle();
-  }
 </script>
-
-<svelte:window {onkeydown} />
 
 {#if route.name === 'tutorial'}
   {#if store.current && store.current.topicId === route.topicId}

@@ -63,23 +63,28 @@ export const INFIX_OPS: ReadonlySet<string> = new Set<string>([
   ...MUL_OPS,
 ]);
 
-const CLOSERS: Record<string, string> = { '(': ')', '{': '}', '[': ']' };
+const CLOSERS = new Map<string, string>([
+  ['(', ')'],
+  ['{', '}'],
+  ['[', ']'],
+]);
+const isOpener = (v: string | null) => v !== null && CLOSERS.has(v);
 
 /** A line ending with one of these continues on the next line. */
 const ENDS_OPEN = new Set<string>([
   ...INFIX_OPS,
-  ...Object.keys(CLOSERS),
-  ',', '•', '|', ':', ';', '¬', 'dom', 'ran', 'ℙ', '#', '∀', '∃', 'Δ', 'Ξ',
+  ...CLOSERS.keys(),
+  ',', '.', '|', ':', ';', '¬', 'dom', 'ran', 'ℙ', '#', '∀', '∃', 'Δ', 'Ξ',
 ]);
 /** A line starting with one of these continues the previous line. ('-' is excluded: it may be a unary minus.) */
 const STARTS_CONT = new Set<string>([
   ...[...INFIX_OPS].filter((o) => o !== '-'),
-  ...Object.values(CLOSERS),
-  '•', '|', ',', ':',
+  ...CLOSERS.values(),
+  '.', '|', ',', ':',
 ]);
 
 /** Out-of-scope symbols with a friendly explanation. */
-const OUT_OF_SCOPE: Record<string, string> = {
+const OUT_OF_SCOPE = new Map<string, string>(Object.entries({
   '⦇': '‘⦇ ⦈’ (relational image) is not part of this tutorial — use a set comprehension, e.g. { y : Y | (x ↦ y) ∈ R }',
   '⦈': '‘⦇ ⦈’ (relational image) is not part of this tutorial — use a set comprehension, e.g. { y : Y | (x ↦ y) ∈ R }',
   '⤔': '‘⤔’ (partial injection) is not part of this tutorial — use ‘⇸’',
@@ -90,8 +95,8 @@ const OUT_OF_SCOPE: Record<string, string> = {
   '⟩': 'Sequences (‘seq’, ‘⟨ ⟩’) are not part of this tutorial',
   '⁀': 'Sequences (‘⁀’) are not part of this tutorial',
   '≙': 'Schema definitions with ‘≙’ are not part of this tutorial — use the schema boxes',
-  '⨾': 'Relational composition ‘⨾’ is not part of this tutorial — use ∃, e.g. ∃ y : Y • (x ↦ y) ∈ R ∧ (y ↦ z) ∈ S',
-  '∘': 'Relational composition ‘∘’ is not part of this tutorial — use ∃, e.g. ∃ y : Y • (x ↦ y) ∈ R ∧ (y ↦ z) ∈ S',
+  '⨾': 'Relational composition ‘⨾’ is not part of this tutorial — use ∃, e.g. ∃ y ∈ Y . (x ↦ y) ∈ R ∧ (y ↦ z) ∈ S',
+  '∘': 'Relational composition ‘∘’ is not part of this tutorial — use ∃, e.g. ∃ y ∈ Y . (x ↦ y) ∈ R ∧ (y ↦ z) ∈ S',
   '∼': 'Relational inverse ‘∼’ is not part of this tutorial — swap the pair instead, e.g. (y ↦ x) ∈ R',
   '˜': 'Relational inverse ‘˜’ is not part of this tutorial — swap the pair instead, e.g. (y ↦ x) ∈ R',
   '⁺': 'Transitive closure is not part of this tutorial',
@@ -115,39 +120,30 @@ const OUT_OF_SCOPE: Record<string, string> = {
   'ℝ': '‘ℝ’ (real numbers) is not part of this tutorial — use ℤ (whole numbers)',
   '⩤': '‘⩤’ (domain subtraction) is not part of this tutorial — use ∖ or a set comprehension instead',
   '◁': '‘◁’ (domain restriction) is not part of this tutorial — use a set comprehension instead',
-};
+  '⇐': 'Write ‘⇒’ with the two sides swapped (‘⇐’ is not part of this tutorial)',
+  '⟸': 'Write ‘⇒’ with the two sides swapped (‘⟸’ is not part of this tutorial)',
+}));
 
 /** Identifiers (lexed as letters) that start out-of-scope constructs. */
 const OUT_OF_SCOPE_IDENT_PREFIX: [string, string][] = [
   ['θ', '‘θ’ (theta) is not part of this tutorial'],
-  ['λ', '‘λ’ (lambda) is not part of this tutorial — use a set comprehension, e.g. { x : X • (x ↦ e) }'],
+  ['λ', '‘λ’ (lambda) is not part of this tutorial — use a set comprehension, e.g. { x ∈ X . (x ↦ e) }'],
   ['μ', '‘μ’ (definite description) is not part of this tutorial — use ∃ or a function'],
 ];
 
 /** Words of out-of-scope constructs (treated as reserved). */
-const OUT_OF_SCOPE_WORDS: Record<string, string> = {
-  if: '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …',
-  then: '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …',
-  else: '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …',
-  let: '‘let’ is not part of this tutorial — write the expression out where it is used',
-};
+const OUT_OF_SCOPE_WORDS = new Map<string, string>([
+  ['if', '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …'],
+  ['then', '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …'],
+  ['else', '‘if … then … else’ is not part of this tutorial — write two implications: P ⇒ … and ¬ P ⇒ …'],
+  ['let', '‘let’ is not part of this tutorial — write the expression out where it is used'],
+]);
 
 /** The arrow blocks of Unicode: an unknown arrow is one of the Z arrows we leave out. */
 const isArrow = (cp: string) => {
   const c = cp.codePointAt(0) ?? 0;
   return (c >= 0x2190 && c <= 0x21ff) || (c >= 0x27f0 && c <= 0x27ff) || (c >= 0x2900 && c <= 0x297f) || (c >= 0x2b00 && c <= 0x2bff);
 };
-
-/** ASCII spellings of the arrows left out (longest first). */
-const ASCII_ARROWS: [string, string][] = [
-  ['>->>', '⤖'],
-  ['+->>', '⤀'],
-  ['-->>', '↠'],
-  ['>-|>', '⤔'],
-  ['>->', '↣'],
-  ['>+>', '⤔'],
-  ['->>', '↠'],
-];
 
 const WHOLE_NUMBERS = 'Only whole numbers are part of this tutorial.';
 const TOO_LARGE = 'Numbers this large are not supported here.';
@@ -186,7 +182,7 @@ function splitLines(toks: Token[], semicolons: boolean): Line[] {
       cur = [];
       continue;
     }
-    if (v && v in CLOSERS) depth++;
+    if (isOpener(v)) depth++;
     else if (v === ')' || v === '}' || v === ']') depth = Math.max(0, depth - 1);
     cur.push(t);
   }
@@ -197,7 +193,7 @@ function splitLines(toks: Token[], semicolons: boolean): Line[] {
 function bracketDepth(line: Line, depth: number): number {
   for (const t of line) {
     const v = opv(t);
-    if (v && v in CLOSERS) depth++;
+    if (isOpener(v)) depth++;
     else if (v === ')' || v === '}' || v === ']') depth = Math.max(0, depth - 1);
   }
   return depth;
@@ -206,7 +202,7 @@ function bracketDepth(line: Line, depth: number): number {
 /**
  * Group lines into items. A line continues the previous item if brackets are still
  * open (`useDepth`), if the previous line ends with an infix operator, ',', an opening
- * bracket, '•', '|', …, or if the line starts with an infix operator.
+ * bracket, '.', '|', …, or if the line starts with an infix operator.
  * An empty line always ends the item.
  */
 function chunkLines(lines: Line[], useDepth: boolean): Line[][] {
@@ -242,23 +238,17 @@ function chunkLines(lines: Line[], useDepth: boolean): Line[][] {
 }
 
 /** Report out-of-scope constructs and common typos before parsing an item. */
-function prescan(toks: Token[], text: string): void {
+function prescan(toks: Token[]): void {
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
     const prev = toks[i - 1];
-    const next = toks[i + 1];
     if (t.kind === 'number') {
       if (t.value.includes('.')) throw new ParseError(t.from, t.to, WHOLE_NUMBERS);
       if (!Number.isSafeInteger(Number(t.value))) throw new ParseError(t.from, t.to, TOO_LARGE);
     }
     if (t.kind === 'error') {
-      const cp = String.fromCodePoint(text.codePointAt(t.from) ?? 0xfffd);
-      // a stray decimal point: `.5` or `1.`
-      if (cp === '.' && ((next?.kind === 'number' && next.from === t.to) || (prev?.kind === 'number' && prev.to === t.from))) {
-        throw new ParseError(t.from, t.to, WHOLE_NUMBERS);
-      }
       // ℙ₁ and ∃₁ (the subscript is not part of the symbol)
-      if (cp === '₁' && prev && prev.to === t.from && (prev.value === 'ℙ' || prev.value === '∃')) {
+      if (t.value === '₁' && prev && prev.to === t.from && (prev.value === 'ℙ' || prev.value === '∃')) {
         throw new ParseError(
           prev.from,
           t.to,
@@ -267,13 +257,13 @@ function prescan(toks: Token[], text: string): void {
             : '‘∃₁’ (exactly one) is not part of this tutorial — use ∃ and say that any two such values are equal',
         );
       }
-      throw new ParseError(t.from, t.from + cp.length, unknownSymbolMessage(cp));
+      throw new ParseError(t.from, t.to, unknownSymbolMessage(t.value));
     }
     if (t.kind === 'ident' && !t.decoration) {
       for (const [prefix, msg] of OUT_OF_SCOPE_IDENT_PREFIX) {
         if (t.value.startsWith(prefix)) throw new ParseError(t.from, t.to, msg);
       }
-      const word = OUT_OF_SCOPE_WORDS[t.value];
+      const word = OUT_OF_SCOPE_WORDS.get(t.value);
       if (word) throw new ParseError(t.from, t.to, word);
     }
     const v = opv(t);
@@ -295,23 +285,22 @@ function prescan(toks: Token[], text: string): void {
     if (v === '|' && opv(n) === '|' && adj(t, n)) {
       throw new ParseError(t.from, n.to, 'Write ‘∨’ for “or”');
     }
-    // ASCII spellings of the out-of-scope arrows (>->, ->>, …), ⊕ (++), ◁ (<|) and ⩤ (<<|)
-    if ((t.kind === 'sym' || t.kind === 'keyword') && !(prev && prev.to === t.from && (prev.kind === 'sym' || prev.kind === 'keyword'))) {
-      const hit = ASCII_ARROWS.find(([a]) => text.startsWith(a, t.from));
-      if (hit) throw new ParseError(t.from, t.from + hit[0].length, OUT_OF_SCOPE[hit[1]]);
-    }
-    if (v === '+' && opv(n) === '+' && adj(t, n)) throw new ParseError(t.from, n.to, OUT_OF_SCOPE['⊕']);
-    if (v === '<' && opv(n) === '|' && adj(t, n)) throw new ParseError(t.from, n.to, OUT_OF_SCOPE['◁']);
+    // ASCII spellings of ⊕ (++), ◁ (<|) and ⩤ (<<|). (The lexer reads the ASCII spellings
+    // of the out-of-scope arrows, like >-> or ->>, as the arrows themselves.)
+    if (v === '+' && opv(n) === '+' && adj(t, n)) throw new ParseError(t.from, n.to, OUT_OF_SCOPE.get('⊕')!);
+    if (v === '<' && opv(n) === '|' && adj(t, n)) throw new ParseError(t.from, n.to, OUT_OF_SCOPE.get('◁')!);
     if (v === '<' && opv(n) === '<' && opv(n2) === '|' && adj(t, n) && adj(n, n2)) {
-      throw new ParseError(t.from, n2.to, OUT_OF_SCOPE['⩤']);
+      throw new ParseError(t.from, n2.to, OUT_OF_SCOPE.get('⩤')!);
     }
   }
 }
 
-function unknownSymbolMessage(cp: string): string {
-  if (OUT_OF_SCOPE[cp]) return OUT_OF_SCOPE[cp];
-  if (isArrow(cp)) return `${q(cp)} is not part of this tutorial — use ⇸, → or ↔`;
-  return `Unknown symbol ${q(cp)}`;
+/** Message for an unknown character (one code point, maybe with combining marks). */
+function unknownSymbolMessage(ch: string): string {
+  const known = OUT_OF_SCOPE.get(ch);
+  if (known) return known;
+  if (isArrow(ch)) return `${q(ch)} is not part of this tutorial — use ⇸, → or ↔`;
+  return `Unknown symbol ${q(ch)}`;
 }
 
 interface Item<T> {
@@ -334,7 +323,7 @@ function parseItems<T>(
     const toks = chunk.flat();
     const sp = span(toks[0].from, toks[toks.length - 1].to);
     toks.push({ kind: 'eof', value: '', from: sp.to, to: sp.to });
-    prescan(toks, text);
+    prescan(toks);
     const p = new Parser(toks);
     const node = parseOne(p);
     return { node, span: sp };
@@ -377,8 +366,21 @@ function parseItems<T>(
 
 type Mode = 'pred' | 'decl' | 'term';
 
+/** `x!=y` written without a space before ‘=’ (see isBangEquals). */
+const bangEquals = new WeakSet<Term>();
+
+/**
+ * Was this predicate written as `x!=y`, with ‘!=’ together? In an operation that
+ * declares the output x! it means `x! = y`; otherwise it is most likely meant as `x ≠ y`.
+ */
+export function isBangEquals(t: Term): boolean {
+  return bangEquals.has(t);
+}
+
 class Parser {
   private pos = 0;
+  /** Results of brace() by start position: the comprehension/display backtracking would otherwise be exponential. */
+  private readonly braces = new Map<number, { term: Term; end: number } | { error: ParseError }>();
   constructor(private readonly toks: Token[]) {}
 
   // token helpers
@@ -511,7 +513,7 @@ class Parser {
     const qt = this.next();
     const qv = qt.value as '∀' | '∃';
     if (this.peek().kind !== 'ident') {
-      this.fail(this.atEnd() ? qt : this.peek(), `Expected a variable after ${q(qv)}, e.g. ${q(qv + ' x : S • …')}`);
+      this.fail(this.atEnd() ? qt : this.peek(), `Expected a variable after ${q(qv)}, e.g. ${q(qv + ' x ∈ S . …')}`);
     }
     const decls = this.declList();
     let pred: Term | undefined;
@@ -519,12 +521,12 @@ class Parser {
       this.next();
       pred = this.pred();
     }
-    if (!this.isOp('•')) {
+    if (!this.isOp('.')) {
       const t = this.peek();
       if (t.kind === 'eof') {
-        this.fail(this.prevTok() ?? qt, `Expected ‘•’ and a predicate, e.g. ${q(qv + ' x : S • P')}`);
+        this.fail(this.prevTok() ?? qt, `Expected ‘.’ and a predicate, e.g. ${q(qv + ' x ∈ S . P')}`);
       }
-      this.fail(t, `Expected ‘•’ before ${q(t.value)}`);
+      this.fail(t, `Expected ‘.’ before ${q(t.value)}`);
     }
     this.next();
     const body = this.pred();
@@ -542,7 +544,10 @@ class Parser {
       if (op2 && REL_OPS.has(op2)) {
         this.fail(this.peek(), `Chains like ‘a ${op} b ${op2} c’ are not allowed — write ‘a ${op} b ∧ b ${op2} c’`);
       }
-      return { kind: 'rel', op: op as RelOp, left, right, span: span(left.span.from, right.span.to) };
+      const term: Term = { kind: 'rel', op: op as RelOp, left, right, span: span(left.span.from, right.span.to) };
+      const bare = left.kind === 'name' && left.span.to - left.span.from === left.name.length; // not `(x!)`
+      if (op === '=' && bare && left.decoration === '!' && opTok.from === left.span.to) bangEquals.add(term);
+      return term;
     }
     return left;
   }
@@ -691,16 +696,34 @@ class Parser {
     return { ...first, span: span(open.from, this.end()) };
   }
 
-  /** `{}` / set display `{a, b}` / set comprehension `{ x : S | P • e }`. */
+  /** `{}` / set display `{a, b}` / set comprehension `{ x ∈ S | P . e }` (memoised). */
   private brace(): Term {
+    const start = this.pos;
+    const memo = this.braces.get(start);
+    if (memo) {
+      if ('error' in memo) throw memo.error;
+      this.pos = memo.end;
+      return memo.term;
+    }
+    try {
+      const term = this.braceUncached();
+      this.braces.set(start, { term, end: this.pos });
+      return term;
+    } catch (e) {
+      if (e instanceof ParseError) this.braces.set(start, { error: e });
+      throw e;
+    }
+  }
+
+  private braceUncached(): Term {
     const open = this.next();
     if (this.isOp('}')) {
       const close = this.next();
       return { kind: 'emptyset', span: span(open.from, close.to) };
     }
     // Comprehension if the braces start with a declaration `x, y : S` or `x ∈ S`.
-    // With ':' this is certain; with '∈' it is only a comprehension if '|' or '•' follows
-    // the declarations (otherwise `{x ∈ S}` is a set display), so we may backtrack.
+    // With ':' this is certain; with '∈' it is a comprehension if '|', '.' or '}' follows
+    // the declarations (otherwise, e.g. `{x ∈ S, y}`, a set display), so we may backtrack.
     let k = 0;
     while (this.peek(k).kind === 'ident' && this.isOp(',', k + 1)) k += 2;
     if (this.peek(k).kind === 'ident') {
@@ -714,7 +737,7 @@ class Parser {
         } catch (e) {
           if (!(e instanceof ParseError)) throw e;
         }
-        if (decls && (this.isOp('|') || this.isOp('•'))) return this.comprehensionRest(open, decls);
+        if (decls && (this.isOp('|') || this.isOp('.') || this.isOp('}'))) return this.comprehensionRest(open, decls);
         this.pos = save;
       }
     }
@@ -738,13 +761,13 @@ class Parser {
       this.next();
       pred = this.pred();
     }
-    if (this.isOp('•')) {
+    if (this.isOp('.')) {
       this.next();
       expr = this.pred();
     }
     if (!this.isOp('}') && !this.atEnd()) {
       const t = this.peek();
-      if (!pred && !expr) this.fail(t, `Expected ‘|’, ‘•’ or ‘}’ before ${q(t.value)}`);
+      if (!pred && !expr) this.fail(t, `Expected ‘|’, ‘.’ or ‘}’ before ${q(t.value)}`);
     }
     this.expectClose(open, '}');
     return { kind: 'setComp', decls, pred, expr, span: span(open.from, this.end()) };
@@ -797,7 +820,7 @@ class Parser {
     } else {
       this.fail(sepTok, `Expected ${schemaPart ? '‘:’' : '‘:’ or ‘∈’'} after ${q(lastName)}`);
     }
-    if (this.atEnd() || this.isOp(';') || this.isOp('|') || this.isOp('•')) {
+    if (this.atEnd() || this.isOp(';') || this.isOp('|') || this.isOp('.')) {
       this.fail(sepTok, `Expected a type after ${q(sep)}`);
     }
     const type = this.expr();
@@ -816,7 +839,7 @@ class Parser {
       throw new ParseError(open.from, open.to, `Missing ${q(closer)} to close this ${q(open.value)}`, true);
     }
     const v = opv(t);
-    if (v && Object.values(CLOSERS).includes(v)) {
+    if (v && [...CLOSERS.values()].includes(v)) {
       this.fail(t, `Expected ${q(closer)} here (to close the ${q(open.value)}), not ${q(v)}`);
     }
     this.fail(t, `Expected ${q(closer)} before ${q(t.value)}`);
@@ -827,7 +850,7 @@ class Parser {
     const prev = this.prevTok();
     if (!prev) throw new ParseError(this.peek().from, this.peek().to, 'Expected a predicate');
     if (prev.value === ':') this.fail(prev, 'Expected a type after ‘:’');
-    if (prev.value === '•') this.fail(prev, 'Expected something after ‘•’');
+    if (prev.value === '.') this.fail(prev, 'Expected something after ‘.’');
     this.fail(prev, `Expected something after ${q(prev.value)}`);
   }
 
@@ -836,12 +859,13 @@ class Parser {
     const prev = this.prevTok();
     if (INFIX_OPS.has(v) || v === '..') {
       const pv = opv(prev);
-      if (prev && pv && (INFIX_OPS.has(pv) || PREFIX_OPS.has(pv) || pv in CLOSERS || pv === ',')) {
+      if (prev && pv && (INFIX_OPS.has(pv) || PREFIX_OPS.has(pv) || isOpener(pv) || pv === ',')) {
         this.fail(t, `Expected something between ${q(pv)} and ${q(v)}`);
       }
       this.fail(t, `Expected something before ${q(v)}`);
     }
-    if (v === ')' || v === '}' || v === ']' || v === ',' || v === '|' || v === '•' || v === ';') {
+    if (v === '.' && this.peek(1).kind === 'number' && this.peek(1).from === t.to) this.fail(t, WHOLE_NUMBERS); // `x = .5`
+    if (v === ')' || v === '}' || v === ']' || v === ',' || v === '|' || v === '.' || v === ';') {
       if (prev) this.fail(prev, `Expected something after ${q(prev.value)}`);
       this.fail(t, `Unexpected ${q(v)}`);
     }
@@ -861,7 +885,7 @@ class Parser {
       this.fail(t, `Write ${q(v)} directly after the name, without a space (e.g. ${q('x' + v)})`);
     }
     if (v === '[') this.fail(t, 'Square brackets are only for given sets like [NAME, DATE] — use ( ) here');
-    if (v === ':') this.fail(t, 'Declarations like ‘x : T’ go above the line (or after ∀ / ∃)');
+    if (v === ':') this.fail(t, 'Declarations like ‘x : T’ go above the line (after ∀ / ∃ write ‘x ∈ S’)');
     if (v === 'div' || v === 'mod') this.fail(t, `Expected something before ${q(v)}`);
     this.fail(t, `Unexpected ${q(v)}`);
   }
@@ -888,8 +912,12 @@ class Parser {
     if (mode === 'decl' && v && (REL_OPS.has(v) || LOGIC_INFIX.has(v))) {
       this.fail(t, 'Predicates go below the line — above it, only declarations like ‘x : T’');
     }
-    if (v === '•') this.fail(t, 'Unexpected ‘•’ — it is used after ∀ x : S or in { x : S • … }');
-    if (v === '|') this.fail(t, 'Unexpected ‘|’ — it is used in { x : S | … } and after ∀ x : S');
+    if (v === '.') {
+      const prev = this.prevTok();
+      if (prev?.kind === 'number' && prev.to === t.from) this.fail(t, WHOLE_NUMBERS); // `x = 1.`
+      this.fail(t, 'Unexpected ‘.’ — it is used in ∀ x ∈ S . P and in { x ∈ S | P . e }');
+    }
+    if (v === '|') this.fail(t, 'Unexpected ‘|’ — it is used in { x ∈ S | … } and after ∀ x ∈ S');
     if (v === '¬') this.fail(t, 'Missing ‘∧’ or ‘∨’ before ‘¬’');
     if (v === '∀' || v === '∃') this.fail(t, `Missing ‘∧’ or ‘⇒’ before ${q(v)}`);
     return this.failCommon(t);
@@ -936,7 +964,7 @@ export function parseGiven(text: string): GivenParse {
     if (opv(t) !== '[') {
       // Something outside brackets: explain common cases, then skip the line.
       try {
-        prescan([...line, { kind: 'eof', value: '', from: 0, to: 0 }], text);
+        prescan([...line, { kind: 'eof', value: '', from: 0, to: 0 }]);
         if (t.kind === 'ident') diag(t.from, t.to, `Write given sets in square brackets, e.g. [${t.base ?? t.value}]`);
         else diag(t.from, t.to, `Unexpected ${q(t.value)} — given sets are written like [NAME, DATE]`);
       } catch (e) {
@@ -985,8 +1013,7 @@ export function parseGiven(text: string): GivenParse {
         err(u.from, u.to, `${q(uv)} is built in — no need to declare it`);
         expectName = false;
       } else if (u.kind === 'error') {
-        const cp = String.fromCodePoint(text.codePointAt(u.from) ?? 0xfffd);
-        err(u.from, u.from + cp.length, unknownSymbolMessage(cp));
+        err(u.from, u.to, unknownSymbolMessage(u.value));
         expectName = false;
       } else {
         err(u.from, u.to, `Unexpected ${q(u.value)} — given sets are written like [NAME, DATE]`);
@@ -1060,7 +1087,7 @@ export function parsePredItems(text: string): { items: PredItem[]; diagnostics: 
 /**
  * Parse a predicate part: predicates separated by newlines (newline = conjunction).
  * A newline does not end a predicate inside brackets, after an infix operator / ',' /
- * opening bracket / '•' / '|', or before a line starting with an infix operator.
+ * opening bracket / '.' / '|', or before a line starting with an infix operator.
  * An empty line always ends a predicate.
  */
 export function parsePreds(text: string): { preds: Term[]; diagnostics: ParseDiagnostic[] } {
@@ -1073,7 +1100,7 @@ export function parseTerm(text: string): { term: Term | null; diagnostics: Parse
   const toks = lex(text).filter((t) => t.kind !== 'newline');
   try {
     if (toks.length === 1) throw new ParseError(0, text.length, 'Expected a predicate');
-    prescan(toks, text);
+    prescan(toks);
     const term = new Parser(toks).predicateItem('term');
     return { term, diagnostics: [] };
   } catch (e) {

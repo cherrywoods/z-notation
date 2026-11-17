@@ -7,6 +7,7 @@ import type { Derivation, SchemaDoc, SpecDoc, ZDiagnostic } from '../spec/model'
 import { LIBRARY, LOANS_OF } from './testing/library';
 import { analyseSpec } from './index';
 import { infer } from './infer';
+import { referenceSpecOf } from '../spec/topics';
 import type { InferenceResult, InferredFact } from './results';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -148,7 +149,8 @@ describe('Library', () => {
   it('nothing is derived for a state variable that is not determined', () => {
     // onLoan′ only constrains dom borrower′; borrower′ itself is not determined
     const r2 = run(lib({ lend: { preds: 'book? ∉ onLoan\nonLoan′ = onLoan ∪ {book?}' } }));
-    expect(factsOf(r2, 'op-lend')).toEqual([]);
+    // (borrower′ is not mentioned, so it stays unchanged: the only fact)
+    expect(factsOf(r2, 'op-lend').map((f) => `${f.kind}: ${f.text}`)).toEqual(['unchanged: borrower′ = borrower']);
     expect(r2.redundant).toEqual([]);
   });
 });
@@ -228,6 +230,25 @@ describe('redundant predicates', () => {
     expect(flagOn(spec, r, 'onLoan = dom borrower').derivation).toMatchObject({ premises: [{ reason: 'invariant before' }] });
     // the effect is still shown in the panel
     expect(factsOf(r, 'op-lend', 'effect').map((f) => f.text)).toEqual(['onLoan′ = onLoan ∪ {book?}']);
+  });
+
+  it('(a) says when the redundant line is the only one with v′ (keeping it lets v change)', () => {
+    const s = structuredClone(referenceSpecOf('medication')!);
+    const prescribe = s.operations.find((o) => o.name === 'Prescribe')!;
+    prescribe.preds = 'p? ∈ patients\n(p? ↦ drug?) ∉ allergic\nprescribed′ = prescribed ∪ {p? ↦ drug?}\nprescribed′ ∩ allergic′ = ∅';
+    const r = run(s);
+    expect(flagOn(s, r, 'prescribed′ ∩ allergic′ = ∅').message).toBe(
+      'Already part of the state invariant (included by ΔWard). It is also the only line with allergic′, so allergic may change here.',
+    );
+    // several variables
+    prescribe.preds = 'p? ∈ patients\n(p? ↦ drug?) ∉ allergic\nprescribed′ = prescribed ∪ {p? ↦ drug?}\ndom allergic′ ⊆ patients′';
+    const r2 = run(s);
+    expect(flagOn(s, r2, 'dom allergic′ ⊆ patients′').message).toBe(
+      'Already part of the state invariant (included by ΔWard). It is also the only line with patients′ and allergic′, so patients and allergic may change here.',
+    );
+    // with allergic′ = allergic written, nothing to add
+    prescribe.preds += '\nallergic′ = allergic\npatients′ = patients';
+    expect(flagOn(s, run(s), 'dom allergic′ ⊆ patients′').message).toBe('Already part of the state invariant (included by ΔWard).');
   });
 
   it('(a) also modulo symmetry of =', () => {
@@ -546,5 +567,197 @@ describe('templates', () => {
     const ms = performance.now() - t0;
     console.log(`infer on six templates: ${ms.toFixed(1)} ms`);
     expect(ms).toBeLessThan(100); // generous for slow CI machines; typically a few ms
+  });
+});
+
+// ── frame convention and guarantees from the invariant ─────────────────────────
+
+describe('frame convention (unmentioned variables stay unchanged)', () => {
+  const bank = referenceSpecOf('bank-account')!;
+  const withdrawWithout = (lines: RegExp) => {
+    const s = structuredClone(bank);
+    const w = s.operations.find((o) => o.name === 'Withdraw')!;
+    w.preds = w.preds
+      .split('\n')
+      .filter((l) => !lines.test(l))
+      .join('\n');
+    return s;
+  };
+
+  it('lists the unmentioned variables as unchanged [not mentioned]', () => {
+    const s = withdrawWithout(/^(owner′ = owner|overdraft′ = overdraft)$/);
+    const facts = factsOf(run(s), 'op-withdraw', 'unchanged');
+    expect(facts.map((f) => f.text)).toEqual(['owner′ = owner ∧ overdraft′ = overdraft']);
+    expect(facts[0].derivation).toEqual({
+      kind: 'facts',
+      premises: [
+        { text: 'owner′ = owner', reason: 'not mentioned' },
+        { text: 'overdraft′ = overdraft', reason: 'not mentioned' },
+      ],
+      conclusion: 'owner′ = owner ∧ overdraft′ = overdraft',
+    });
+  });
+
+  it('does not flag an explicit v′ = v as redundant', () => {
+    const r = run(bank);
+    expect(flags(bank, r, 'op-withdraw')).toEqual([]);
+    expect(factsOf(r, 'op-withdraw', 'unchanged')).toEqual([]);
+  });
+
+  it('derives values the invariant determines instead of keeping them unchanged', () => {
+    // Lend sets borrower′ only; onLoan′ = onLoan ∪ {book?} follows from the invariant
+    const r = run(LIBRARY);
+    expect(factsOf(r, 'op-lend', 'unchanged')).toEqual([]);
+    expect(factsOf(r, 'op-lend', 'effect').map((f) => f.text)).toEqual(['onLoan′ = onLoan ∪ {book?}']);
+  });
+});
+
+describe('guarantees from the invariant', () => {
+  it('Withdraw: the overdraft limit', () => {
+    const r = run(referenceSpecOf('bank-account')!);
+    expect(factsOf(r, 'op-withdraw', 'guaranteed')).toEqual([
+      {
+        schemaId: 'op-withdraw',
+        kind: 'guaranteed',
+        text: 'balance(a?) - amount? ≥ -(overdraft(a?))',
+        derivation: {
+          kind: 'facts',
+          premises: [
+            { text: '∀ a ∈ dom balance′ . balance′(a) ≥ -(overdraft′(a))', reason: 'invariant after' },
+            { text: 'a? ∈ dom balance′', reason: 'spec of Withdraw' },
+            { text: 'balance′(a?) = balance(a?) - amount?', reason: 'spec of Withdraw' },
+            { text: 'overdraft′(a?) = overdraft(a?)', reason: 'unchanged' },
+          ],
+          conclusion: 'balance(a?) - amount? ≥ -(overdraft(a?))',
+        },
+      },
+    ]);
+  });
+
+  it('Withdraw with a pointwise update gives the same guarantee', () => {
+    const s = structuredClone(referenceSpecOf('bank-account')!);
+    const w = s.operations.find((o) => o.name === 'Withdraw')!;
+    w.preds = w.preds.replace(/^balance′ = .*$/m, 'balance′(a?) = balance(a?) - amount?');
+    const texts = factsOf(run(s), 'op-withdraw', 'guaranteed').map((f) => f.text);
+    expect(texts).toEqual(['balance(a?) - amount? ≥ -(overdraft(a?))']);
+  });
+
+  it('Prescribe: no drug the patient is allergic to, and only patients on the ward', () => {
+    const r = run(referenceSpecOf('medication')!);
+    const facts = factsOf(r, 'op-prescribe', 'guaranteed');
+    expect(facts.map((f) => f.text)).toEqual(['p? ∈ patients', '(p? ↦ drug?) ∉ allergic']);
+    expect(facts[1].derivation).toEqual({
+      kind: 'chain',
+      start: 'prescribed′ ∩ allergic′ = ∅',
+      steps: [
+        { rel: '⇔', expr: '(prescribed ∪ {p? ↦ drug?}) ∩ allergic = ∅', reason: 'spec of Prescribe' },
+        { rel: '⇔', expr: 'prescribed ∩ allergic = ∅ ∧ {p? ↦ drug?} ∩ allergic = ∅', reason: 'fact about ∩' },
+        { rel: '⇔', expr: 'prescribed ∩ allergic = ∅ ∧ (p? ↦ drug?) ∉ allergic', reason: 'fact about ∩' },
+        { rel: '⇔', expr: '(p? ↦ drug?) ∉ allergic', reason: 'invariant before' },
+      ],
+    });
+    // shown although the reference also states it as a precondition, and never a redundancy
+    expect(flags(referenceSpecOf('medication')!, r, 'op-prescribe')).toEqual([]);
+  });
+
+  it("Prescribe with functions to sets (the lecturer's spec): taken at the changed point, simplified", () => {
+    const s = structuredClone(referenceSpecOf('medication')!);
+    s.given = '[PATIENT, DRUG]';
+    s.state.decls = 'patients: ℙ PATIENT\nallergic: PATIENT ⇸ ℙ DRUG\nprescribed: PATIENT ⇸ ℙ DRUG';
+    s.state.preds = 'dom allergic ⊆ patients\ndom prescribed ⊆ patients\n∀ p ∈ patients. prescribed(p) ∩ allergic(p) = ∅';
+    const op = s.operations.find((o) => o.name === 'Prescribe')!;
+    op.decls = 'ΔWard\npatient?: PATIENT\ndrug?: DRUG';
+    op.preds = 'patient? ∈ patients\nprescribed′ = prescribed ∖ {patient? ↦ prescribed(patient?)} ∪ {patient? ↦ prescribed(patient?) ∪ {drug?}}';
+    s.operations = [op];
+    const facts = factsOf(run(s), 'op-prescribe', 'guaranteed');
+    expect(facts.map((f) => f.text)).toEqual(['patient? ∈ patients', 'drug? ∉ allergic(patient?)']);
+    expect(facts[1].derivation).toEqual({
+      kind: 'facts',
+      premises: [
+        { text: '∀ p ∈ patients′ . prescribed′(p) ∩ allergic′(p) = ∅', reason: 'invariant after' },
+        { text: 'patient? ∈ patients′', reason: 'patient? ∈ patients (precondition), patients′ = patients (unchanged)' },
+        { text: 'prescribed′(patient?) = prescribed(patient?) ∪ {drug?}', reason: 'spec of Prescribe' },
+        { text: 'allergic′(patient?) = allergic(patient?)', reason: 'unchanged' },
+        { text: '(prescribed(patient?) ∪ {drug?}) ∩ allergic(patient?) = ∅', reason: 'so, at patient?' },
+        { text: 'prescribed(patient?) ∩ allergic(patient?) = ∅', reason: 'invariant before, at patient?' },
+      ],
+      conclusion: 'drug? ∉ allergic(patient?)',
+    });
+    // dom prescribed ∖ {patient?} ⊆ patients follows from the invariant before: not shown
+    const chain = facts[0].derivation;
+    expect(chain.kind === 'chain' && chain.steps[chain.steps.length - 1]).toEqual({ rel: '⇔', expr: 'patient? ∈ patients', reason: 'invariant before' });
+  });
+
+  it('adding to a set: ∀ x ∈ S′ . P is instantiated at the new element', () => {
+    // written explicitly, or derived from the invariant (onLoan′ = onLoan ∪ {book?})
+    for (const preds of ['book? ∉ onLoan\nonLoan′ = onLoan ∪ {book?}\nborrower′ = borrower ∪ {book? ↦ member?}', 'book? ∉ onLoan\nborrower′ = borrower ∪ {book? ↦ member?}']) {
+      const s = lib({ lend: { preds } });
+      s.state.decls += '\nlimit : BOOK ⇸ ℕ';
+      s.state.preds += '\n∀ b ∈ onLoan . b ∈ dom limit';
+      const facts = factsOf(run(s), 'op-lend', 'guaranteed');
+      expect(facts.map((f) => f.text)).toEqual(['book? ∈ dom limit']);
+      expect(facts[0].derivation.kind === 'facts' && facts[0].derivation.premises.map((p) => p.text)).toEqual([
+        '∀ b ∈ onLoan′ . b ∈ dom limit′',
+        'book? ∈ onLoan′',
+        'limit′ = limit',
+      ]);
+    }
+  });
+});
+
+describe('equalities forced by a total function (→ instead of ⇸)', () => {
+  const spec = (() => {
+    const s = structuredClone(referenceSpecOf('medication')!);
+    s.state.decls = 'patients : ℙ PATIENT\nallergic : PATIENT → ℙ DRUG\nprescribed : PATIENT ↔ DRUG';
+    s.state.preds = 'dom allergic ⊆ patients\ndom prescribed ⊆ patients';
+    const v = s.operations.find((o) => o.name === 'ViewPrescriptions')!;
+    v.decls = 'ΞWard\npatient? : PATIENT\ndrugs! : ℙ DRUG';
+    v.preds = 'patient? ∈ patients\ndrugs! = { d ∈ DRUG | (patient? ↦ d) ∈ prescribed }';
+    s.operations = [v];
+    return s;
+  })();
+
+  it('shows the consequence in the state step', () => {
+    expect(factsOf(run(spec), 'state', 'implied')).toEqual([
+      {
+        schemaId: 'state',
+        kind: 'implied',
+        text: 'patients = PATIENT',
+        note: 'every patient is in patients',
+        derivation: {
+          kind: 'facts',
+          premises: [
+            { text: 'dom allergic = PATIENT', reason: 'allergic is total (→)' },
+            { text: 'dom allergic ⊆ patients', reason: 'invariant' },
+            { text: 'patients ⊆ PATIENT', reason: 'declaration of patients' },
+          ],
+          conclusion: 'patients = PATIENT',
+        },
+      },
+    ]);
+  });
+
+  it('explains the redundant precondition step by step', () => {
+    const r = run(spec);
+    const flagsHere = r.redundant.filter((d) => d.section.schemaId === 'op-view-prescriptions');
+    expect(flagsHere.map((d) => d.message)).toEqual(['Already true: allergic is total, so every patient is in patients (patients = PATIENT).']);
+    expect(flagsHere[0].derivation).toEqual({
+      kind: 'facts',
+      premises: [
+        { text: 'dom allergic = PATIENT', reason: 'allergic is total (→)' },
+        { text: 'dom allergic ⊆ patients', reason: 'invariant before' },
+        { text: 'patients = PATIENT', reason: 'so every patient is in patients' },
+        { text: 'patient? ∈ PATIENT', reason: 'declaration of patient?' },
+      ],
+      conclusion: 'patient? ∈ patients',
+    });
+  });
+
+  it('stays quiet with a partial function', () => {
+    const s = structuredClone(spec);
+    s.state.decls = s.state.decls.replace('PATIENT → ℙ DRUG', 'PATIENT ⇸ ℙ DRUG');
+    const r = run(s);
+    expect(factsOf(r, 'state', 'implied')).toEqual([]);
+    expect(r.redundant.filter((d) => d.section.schemaId === 'op-view-prescriptions')).toEqual([]);
   });
 });

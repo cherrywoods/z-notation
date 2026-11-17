@@ -1,5 +1,5 @@
 // CodeMirror 6 setup for editing Z text: symbol highlighting with explainer hovers,
-// ASCII auto-replacement, snippet insertion (symbol library) and diagnostics.
+// ASCII auto-replacement, snippet insertion (SymbolLibrary palette) and diagnostics.
 
 import {
   Decoration,
@@ -11,7 +11,7 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from '@codemirror/view';
-import { EditorState, StateEffect, StateField, RangeSetBuilder, Compartment, type Extension } from '@codemirror/state';
+import { EditorState, StateEffect, StateField, RangeSetBuilder, Compartment, type Extension, type Transaction } from '@codemirror/state';
 import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
 import { snippet } from '@codemirror/autocomplete';
 import { linter, setDiagnostics, forEachDiagnostic, type Diagnostic } from '@codemirror/lint';
@@ -80,7 +80,7 @@ function insideDiagnostic(view: EditorView, pos: number): boolean {
 
 let hovered: Element | null = null;
 
-/** The decorated name or given-set name around `pos` (e.g. `borrower′`, `book?`, `BOOK`). */
+/** The decorated name or given-set name around `pos` (e.g. `prescribed′`, `p?`, `PATIENT`). */
 function subjectAt(view: EditorView, pos: number): string | undefined {
   const line = view.state.doc.lineAt(pos);
   const text = line.text;
@@ -397,36 +397,78 @@ export function setEditorText(view: EditorView, text: string) {
 }
 
 /**
- * Insert a symbol-library snippet at the cursor. `template` uses `${X}` fields.
+ * Insert a SymbolLibrary snippet at the cursor. `template` uses `${X}` fields.
  * If text directly before the cursor looks like a left operand (identifier, `)` or
  * `}`), a binary snippet `${X} op ${Y}` reuses it: `NAME|` + ⇸ → `NAME ⇸ ${Y}`.
+ * A selection becomes the content of the first field, exactly as it is.
  */
 export function insertSnippet(view: EditorView, template: string) {
-  const sel = view.state.selection.main;
+  applySnippet(view, template);
+  view.focus();
+}
+
+/** Where `applySnippet` inserts: an EditorView, or a stand-in (tests). */
+export interface SnippetTarget {
+  readonly state: EditorState;
+  dispatch(tr: Transaction): void;
+}
+
+/** The document change of `insertSnippet` (exported for tests). */
+export function applySnippet(target: SnippetTarget, template: string): void {
+  const { state } = target;
+  const sel = state.selection.main;
   let from = sel.from;
-  const to = sel.to;
+  let to = sel.to;
   let tpl = template;
-  const binary = /^\$\{[^}]*\} (\S+) /.exec(template);
-  if (sel.empty && binary) {
-    const line = view.state.doc.lineAt(from);
-    const before = view.state.doc.sliceString(line.from, from);
-    const trimmed = before.replace(/ +$/, '');
-    const last = trimmed[trimmed.length - 1];
-    if (last && (isIdentChar(last) || last === ')' || last === '}' || last === '′' || last === '?' || last === '!')) {
-      // drop the first field; normalise spacing to exactly one space before the operator
-      from = line.from + trimmed.length;
-      tpl = ' ' + template.slice(binary[0].length - binary[1].length - 1);
+  const field = /[#$]\{[^}]*\}/.exec(template);
+  if (sel.empty) {
+    const binary = /^\$\{[^}]*\} (\S+) /.exec(template);
+    if (binary) {
+      const line = state.doc.lineAt(from);
+      const before = state.doc.sliceString(line.from, from);
+      const trimmed = before.replace(/ +$/, '');
+      const last = trimmed[trimmed.length - 1];
+      if (last && (isIdentChar(last) || last === ')' || last === '}' || last === '′' || last === '?' || last === '!')) {
+        // drop the first field; normalise spacing to exactly one space before the operator
+        from = line.from + trimmed.length;
+        tpl = ' ' + template.slice(binary[0].length - binary[1].length - 1);
+      }
     }
-  } else if (!sel.empty && /^\$\{[^}]*\}/.test(template)) {
-    // use the selection as the first field's content
-    const selected = view.state.sliceDoc(sel.from, sel.to).replace(/[{}$\\]/g, '');
-    tpl = template.replace(/^\$\{[^}]*\}/, '${' + selected + '}');
+  } else if (field) {
+    // The selection fills the first field. It is not a field itself, so it is neither
+    // linked to the other fields nor re-read as snippet syntax.
+    const selected = state.sliceDoc(sel.from, sel.to);
+    const before = template.slice(0, field.index);
+    const after = template.slice(field.index + field[0].length);
+    if (!/[#$]\{/.test(after)) {
+      // no field left: plain text (`dom` + selection)
+      target.dispatch(state.update(state.replaceSelection(before + selected + after), { userEvent: 'input' }));
+      return;
+    }
+    if (!before) {
+      // `${A} ∪ ${B}`: keep the selection where it is and add the rest after it
+      from = to = sel.to;
+      tpl = after;
+    } else {
+      const indent = /^\s*/.exec(state.doc.lineAt(sel.from).text)![0];
+      tpl = before + literalSnippetText(selected, indent) + after;
+    }
   }
   if (!tpl.includes('${')) {
-    view.dispatch(view.state.replaceSelection(tpl));
-    view.focus();
+    target.dispatch(state.update(state.replaceSelection(tpl), { userEvent: 'input' }));
     return;
   }
-  snippet(tpl)(view, null as never, from, to);
-  view.focus();
+  snippet(tpl)(target, null, from, to);
+}
+
+/**
+ * `text` as literal text inside a snippet template: braces escaped. The snippet indents
+ * every further line like the line it starts on, so that indentation is taken off first.
+ */
+function literalSnippetText(text: string, indent: string): string {
+  return text
+    .split('\n')
+    .map((l, i) => (i > 0 && indent && l.startsWith(indent) ? l.slice(indent.length) : l))
+    .join('\n')
+    .replace(/[{}]/g, '\\$&');
 }

@@ -1,6 +1,6 @@
 <!--
   Tutorial shell: thin header (home · title · step row · reset), the current step view
-  (direction-aware slide/fade), big back/next arrows, Alt+←/→.
+  (direction-aware slide/fade), big back/next arrows, Alt+←/→ (not while typing).
   Expects store.current to be the spec of `topicId` (App.svelte opens it).
 -->
 <script lang="ts">
@@ -99,8 +99,14 @@
     router.go(prev ? stepHref(topicId, prev.id) : '#/');
   }
 
+  /** In a text field or editor, Alt/Option+←/→ moves by words; it does not change the step. */
+  function typing(t: EventTarget | null) {
+    const el = t as HTMLElement | null;
+    return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || !!el.closest?.('.cm-editor'));
+  }
+
   function onkeydown(e: KeyboardEvent) {
-    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.defaultPrevented || typing(e.target)) return;
     if (e.key === 'ArrowRight' && next) {
       e.preventDefault();
       goNext();

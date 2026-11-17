@@ -1,6 +1,6 @@
 <!--
   Start page: title, topic ring (or carousel when the ring does not fit), start arrow,
-  faint presentation-mode trigger (bottom left; also key `p`).
+  faint QR icon (bottom left): the only switch for presenter mode.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -168,7 +168,7 @@
     class:on={presenter.on}
     aria-pressed={presenter.on}
     aria-label="Presenter mode"
-    title="Presenter mode (P)"
+    title="Presenter mode"
     onclick={() => presenter.toggle()}
   >
     <QrCode size={18} strokeWidth={1.6} />

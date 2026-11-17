@@ -12,7 +12,8 @@
 //
 // Facts:
 //   'effect'     Δ operations: v′ = e for state variables the operation does not set
-//   'unchanged'  Ξ operations: v′ = v
+//   'unchanged'  Ξ operations: v′ = v; Δ operations: v′ = v for unmentioned variables
+//   'guaranteed' Δ operations: what the invariant after demands where the state changes
 //   'defined'    x ∈ dom f for applications f(x) (text `x ∈ dom f`)
 //   'initial'    values implied by Init + invariant (onLoan = ∅ ⇒ borrower = ∅)
 //
@@ -28,9 +29,13 @@ import type { Span, Term } from './ast';
 import type { Analysis, PredInfo, SchemaInfo } from './index';
 import { children, freeVars, printTerm, rename, substitute } from './print';
 import type { InferenceResult, InferredFact } from './results';
-import { Prover, dedupe, premiseOf, type Atom, type Premise } from './infer/prove';
+import { Prover, declPremise, dedupe, premiseOf, type Atom, type Premise, type PremiseSource } from './infer/prove';
+import { reduceByFunctions } from './infer/functions';
+import { lex } from './lexer';
+import { parseTerm } from './parser';
 import { simplify, type Law, type LawEnv } from './infer/rewrite';
-import { conjuncts, containsKey, eqSide, isEmptySet, key, mentions, mk, replaceSub, view } from './infer/terms';
+import { conjuncts, containsKey, eqSide, isEmptySet, key, mentions, mk, pairParts, replaceSub, view } from './infer/terms';
+import { determinations, frozenVars } from './frame';
 
 export interface InferOptions {
   /** Rethrow internal errors instead of skipping the schema (tests). */
@@ -48,7 +53,7 @@ export function infer(spec: SpecDoc, an: Analysis, opts: InferOptions = {}): Inf
       const ctx = context(an, s, docs.get(s.id));
       if (s.role === 'init' && !ctx.initNames) continue;
       if (s.role === 'operation' && !s.imports) continue;
-      const f = s.role === 'init' ? initFacts(ctx) : s.role === 'operation' ? opFacts(ctx) : [];
+      const f = s.role === 'init' ? initFacts(ctx) : s.role === 'operation' ? opFacts(ctx) : forcedFacts(ctx);
       const r = redundancy(ctx);
       facts.push(...f);
       redundant.push(...r);
@@ -86,6 +91,8 @@ interface Ctx {
   inv: Term[];
   invP: Term[];
   xi: Term[];
+  /** `v′ = v` for the state variables a Δ operation does not mention. */
+  frame: Term[];
   /** How the state is imported: 'ΔLibrary', 'ΞLibrary', 'Library'. */
   importText: string;
   /** Init: the state variables as named in Init (primed if it imports State′). */
@@ -119,6 +126,7 @@ function context(an: Analysis, s: SchemaInfo, doc: SchemaDoc | undefined): Ctx {
     inv: conjOf('invariant'),
     invP: conjOf('invariant′'),
     xi: s.preds.filter((p) => p.origin === 'xi').map((p) => p.term),
+    frame: s.preds.filter((p) => p.origin === 'frame').map((p) => p.term),
     importText: s.role === 'operation' ? `${s.imports ?? ''}${S}` : s.role === 'init' ? (s.initImport === 'primed' ? `${S}′` : S) : '',
     initNames,
   };
@@ -145,8 +153,13 @@ function invAtoms(ctx: Ctx, primed: boolean): Atom[] {
 }
 
 function xiAtoms(ctx: Ctx): Atom[] {
-  return ctx.xi.map((term) => ({ term, reason: `Ξ${ctx.stateName}`, src: 'xi' as const }));
+  return [
+    ...ctx.xi.map((term) => ({ term, reason: `Ξ${ctx.stateName}`, src: 'xi' as const })),
+    ...ctx.frame.map((term) => ({ term, reason: NOT_MENTIONED, src: 'frame' as const })),
+  ];
 }
+
+const NOT_MENTIONED = 'not mentioned';
 
 /** Functions (⇸, →) for the law dom (f ∖ {a ↦ f(a)}) = dom f ∖ {a}. */
 function lawEnv(ctx: Ctx): LawEnv {
@@ -167,6 +180,19 @@ interface Def {
   e: Term;
   /** The own conjunct `v′ = e`, printed. */
   text: string;
+  /** Bracket text when it is not the operation's own line ('not mentioned'). */
+  reason?: string;
+}
+
+/** `v′ = v` for the variables the operation does not mention, as definitions. */
+function frameDefs(ctx: Ctx, defs: Map<string, Def>): Map<string, Def> {
+  const all = new Map(defs);
+  for (const t of ctx.frame) {
+    if (t.kind === 'rel' && t.left.kind === 'name' && !all.has(t.left.name)) {
+      all.set(t.left.name, { e: t.right, text: printTerm(t), reason: NOT_MENTIONED });
+    }
+  }
+  return all;
 }
 
 /** Own conjuncts `v′ = e` (e without after-state variables), first one per variable. */
@@ -189,7 +215,7 @@ function explicitDefs(ctx: Ctx, lines: Line[]): Map<string, Def> {
 }
 
 interface Step {
-  rel: '=';
+  rel: '=' | '⇔';
   expr: string;
   reason: string;
   term: Term;
@@ -227,7 +253,7 @@ function deriveEffect(ctx: Ctx, vP: string, defs: Map<string, Def>): Effect | nu
     }
     if (sub.size) {
       cur = substitute(cur, sub);
-      push(cur, `spec of ${ctx.s.name}`);
+      push(cur, [...new Set(used.map((d) => d.reason ?? `spec of ${ctx.s.name}`))].join(', '));
     }
     for (const st of simplify(cur, lawEnv(ctx))) {
       cur = st.term;
@@ -284,8 +310,17 @@ function opFacts(ctx: Ctx): InferredFact[] {
       });
     }
   }
+  if (ctx.s.imports === 'Δ' && ctx.frame.length) {
+    const text = printTerm(ctx.frame.reduce((a, b) => ({ kind: 'logic', op: '∧', left: a, right: b, span: a.span })));
+    out.push({
+      schemaId,
+      kind: 'unchanged',
+      text,
+      derivation: { kind: 'facts', premises: ctx.frame.map((t) => ({ text: printTerm(t), reason: NOT_MENTIONED })), conclusion: text },
+    });
+  }
   if (ctx.s.imports === 'Δ') {
-    const defs = explicitDefs(ctx, ctx.lines);
+    const defs = frameDefs(ctx, explicitDefs(ctx, ctx.lines));
     for (const v of ctx.stateVars) {
       const vP = v + '′';
       if (defs.has(vP)) continue;
@@ -300,6 +335,7 @@ function opFacts(ctx: Ctx): InferredFact[] {
     }
   }
   out.push(...definedFacts(ctx));
+  if (ctx.s.imports === 'Δ') out.push(...guaranteedFacts(ctx));
   return out;
 }
 
@@ -343,9 +379,409 @@ function definedFacts(ctx: Ctx): InferredFact[] {
     const proof = new Prover({ atoms, decls: ctx.decls, givenSets: ctx.given, laws: lawEnv(ctx) }).mem(app.arg, dom);
     if (!proof || proof.length === 0) continue;
     const text = printTerm(goal);
-    out.push({ schemaId: ctx.s.id, kind: 'defined', text, derivation: { kind: 'facts', premises: strip(proof), conclusion: text } });
+    const premises = explainForced(ctx, proof).premises;
+    out.push({ schemaId: ctx.s.id, kind: 'defined', text, derivation: { kind: 'facts', premises: strip(premises), conclusion: text } });
   }
   return out;
+}
+
+// ── guarantees: what the invariant after demands where the state changes ──────
+//
+// A Δ operation must keep the invariant. Where it changes the state, the invariant
+// after therefore imposes a condition on the before-state and inputs — an implicit
+// precondition. Two shapes, with sound steps only:
+//
+//   ∀ x ∈ dom f′ . P (or ∀ x ∈ S′ . P), and the operation sets f′(x₀) = e (or adds x₀
+//   to S′): P at x₀, with f′(x₀) = e and the unchanged variables put in.
+//
+//   an invariant without ∀ (prescribed′ ∩ allergic′ = ∅): put in the new values, split
+//   along ∪ / displays (each step an equivalence) and drop what the invariant before
+//   already says. What remains is the condition.
+
+interface Known {
+  /** What the primed variable equals, and the premise saying so. */
+  e: Term;
+  premise: Premise;
+}
+interface Point {
+  /** The primed variable (f′ or S′). */
+  v: string;
+  x: Term;
+  /** f′(x) = e, for a function; undefined for a set S′ that gets the element x. */
+  e?: Term;
+  /** Where the point comes from. */
+  premise: Premise;
+}
+
+const SPAN = { from: 0, to: 0 };
+const unionOperands = (t: Term): Term[] => (t.kind === 'binop' && t.op === '∪' ? [...unionOperands(t.left), ...unionOperands(t.right)] : [t]);
+const andOf = (ts: Term[]): Term => ts.reduce((a, b) => ({ kind: 'logic', op: '∧', left: a, right: b, span: SPAN }));
+const apply = (fn: string, arg: Term): Term => ({ kind: 'apply', fn: mk.name(fn), arg, span: SPAN });
+
+/** The after-state values the operation fixes: whole variables and single points. */
+function afterState(ctx: Ctx): { whole: Map<string, Known>; points: Point[] } {
+  const spec = `spec of ${ctx.s.name}`;
+  const whole = new Map<string, Known>();
+  for (const [v, d] of explicitDefs(ctx, ctx.lines)) whole.set(v, { e: d.e, premise: { text: d.text, reason: spec, src: 'own' } });
+  for (const t of [...ctx.frame, ...ctx.xi]) {
+    if (t.kind !== 'rel' || t.left.kind !== 'name' || whole.has(t.left.name)) continue;
+    const reason = ctx.frame.includes(t) ? NOT_MENTIONED : `Ξ${ctx.stateName}`;
+    whole.set(t.left.name, { e: t.right, premise: { text: printTerm(t), reason, src: 'frame' } });
+  }
+  // effects the invariant determines (onLoan′ = onLoan ∪ {book?}), as in the effect facts
+  const defs = frameDefs(ctx, explicitDefs(ctx, ctx.lines));
+  for (const v of ctx.stateVars) {
+    const vP = v + '′';
+    if (whole.has(vP)) continue;
+    const eff = deriveEffect(ctx, vP, defs);
+    if (eff) whole.set(vP, { e: eff.result, premise: { text: printTerm(mk.rel('=', mk.name(vP), eff.result)), reason: 'effect', src: 'inv' } });
+  }
+  const points: Point[] = [];
+  const env = lawEnv(ctx);
+  for (const [v, w] of whole) {
+    for (const op of unionOperands(w.e)) {
+      if (op.kind !== 'setDisplay') continue;
+      for (const el of op.elems) {
+        const pp = pairParts(el);
+        // f′ = A ∪ {x ↦ e} with f′ a function: (x ↦ e) ∈ f′, so f′(x) = e and x ∈ dom f′
+        if (pp && env.isFunction(v.slice(0, -1))) points.push({ v, x: pp[0], e: pp[1], premise: w.premise });
+        else if (!pp) points.push({ v, x: el, premise: w.premise });
+      }
+    }
+  }
+  // lines f′(x) = e (pointwise updates)
+  for (const l of ctx.lines) {
+    for (const c of l.conj) {
+      if (c.kind !== 'rel' || c.op !== '=') continue;
+      for (const [a, e] of [
+        [c.left, c.right],
+        [c.right, c.left],
+      ]) {
+        if (a.kind === 'apply' && a.fn.kind === 'name' && ctx.primed.has(a.fn.name) && !mentions(e, ctx.primed) && !mentions(a.arg, ctx.primed)) {
+          points.push({ v: a.fn.name, x: a.arg, e, premise: { text: printTerm(c), reason: spec, src: 'own' } });
+        }
+      }
+    }
+  }
+  return { whole, points };
+}
+
+/**
+ * Replace the after-state variables of `t` by what the operation says about them
+ * (values at points first, then whole variables); null if some remain open.
+ */
+function intoBefore(ctx: Ctx, t: Term, after: ReturnType<typeof afterState>, used: Premise[]): Term | null {
+  let cur = t;
+  for (const p of after.points) {
+    if (!p.e) continue;
+    const app = apply(p.v, p.x);
+    const r = replaceSub(cur, key(app), p.e);
+    if (!r) continue;
+    cur = r;
+    used.push({ text: printTerm(mk.rel('=', app, p.e)), reason: p.premise.reason, src: p.premise.src });
+  }
+  for (const n of freeVars(cur)) {
+    if (!ctx.primed.has(n)) continue;
+    const w = after.whole.get(n);
+    if (!w) return null;
+    // an unchanged function used at single points: show f′(x) = f(x) rather than f′ = f
+    const apps: Term[] = [];
+    collectApps(cur, new Set(), apps as Extract<Term, { kind: 'apply' }>[]);
+    const atN = apps.filter((a) => a.kind === 'apply' && a.fn.kind === 'name' && a.fn.name === n);
+    const unchanged = w.e.kind === 'name' && w.e.name + '′' === n;
+    cur = substitute(cur, new Map([[n, w.e]]));
+    if (unchanged && atN.length && !mentionsBare(t, n)) {
+      for (const a of atN) {
+        if (a.kind !== 'apply') continue;
+        const text = printTerm(mk.rel('=', a, apply(w.e.kind === 'name' ? w.e.name : n, a.arg)));
+        used.push({ text, reason: 'unchanged', src: w.premise.src });
+      }
+    } else used.push(w.premise);
+  }
+  return mentions(cur, ctx.primed) ? null : cur;
+}
+
+/** Does `name` occur other than as the function of an application? */
+function mentionsBare(t: Term, name: string): boolean {
+  if (t.kind === 'name') return t.name === name;
+  if (t.kind === 'apply' && t.fn.kind === 'name' && t.fn.name === name) return mentionsBare(t.arg, name);
+  return children(t).some((c) => mentionsBare(c, name));
+}
+
+function guaranteedFacts(ctx: Ctx): InferredFact[] {
+  const after = afterState(ctx);
+  const out: InferredFact[] = [];
+  const seen = new Set<string>();
+  const add = (text: string, derivation: Derivation) => {
+    if (seen.has(text)) return;
+    seen.add(text);
+    out.push({ schemaId: ctx.s.id, kind: 'guaranteed', text, derivation });
+  };
+  const invBefore = new Set(ctx.inv.map(key));
+
+  for (const c of ctx.invP) {
+    if (!mentions(c, ctx.primed)) continue;
+    if (c.kind === 'quant') {
+      // ∀ x ∈ D . P (one variable), taken at a point where the operation changes the state
+      if (c.q !== '∀' || c.decls.length !== 1 || c.decls[0].names.length !== 1) continue;
+      const x = c.decls[0].names[0].name;
+      const D = c.decls[0].type;
+      const body: Term = c.pred ? { kind: 'logic', op: '⇒', left: c.pred, right: c.body, span: SPAN } : c.body;
+      for (const { p, at } of quantPoints(ctx, after, x, D, body)) {
+        const used: Premise[] = [];
+        const res = intoBefore(ctx, substitute(body, new Map([[x, p.x]])), after, used);
+        if (!res || invBefore.has(key(res))) continue;
+        // split along ∪ / displays and drop what the invariant before already says there
+        const known = beforeAt(ctx, p.x);
+        const simple = splitAndDrop(res, known, beforeProver(ctx));
+        if (!simple) continue;
+        const text = printTerm(simple.result);
+        const premises: Premise[] = [{ text: printTerm(c), reason: 'invariant after', src: 'inv' }, at, ...used];
+        if (simple.changed) premises.push({ text: printTerm(res), reason: `so, at ${printTerm(p.x)}`, src: 'inv' }, ...simple.dropped);
+        add(text, { kind: 'facts', premises: strip(dedupe(premises)), conclusion: text });
+      }
+      continue;
+    }
+    // an invariant without ∀: put in the after state, split, drop the invariant before
+    const used: Premise[] = [];
+    const sub = intoBefore(ctx, c, { whole: after.whole, points: [] }, used);
+    if (!sub || invBefore.has(key(sub))) continue;
+    const steps: Step[] = [];
+    const push = (term: Term, reason: string) => steps.push({ rel: '⇔', expr: printTerm(term), reason, term });
+    push(sub, [...new Set(used.map((u) => u.reason))].join(', '));
+    let cur = sub;
+    for (const st of simplify(cur, lawEnv(ctx))) {
+      cur = st.term;
+      push(cur, st.law.reason);
+    }
+    let list = conjuncts(cur);
+    let split = false;
+    for (let round = 0; round < 6; round++) {
+      let reason: string | null = null;
+      const next: Term[] = [];
+      for (const t of list) {
+        const r = splitStep(t);
+        if (r) {
+          next.push(...r.parts);
+          reason = r.reason;
+          split = true;
+        } else next.push(t);
+      }
+      if (!reason) break;
+      list = next;
+      push(andOf(list), reason);
+    }
+    if (!split) continue;
+    const fromBefore = beforeProver(ctx);
+    const kept = list.filter((t) => !invBefore.has(key(t)) && !followsFrom(fromBefore, t));
+    if (!kept.length || mentions(andOf(kept), ctx.primed)) continue;
+    if (kept.length < list.length) push(andOf(kept), 'invariant before');
+    const text = printTerm(andOf(kept));
+    add(text, { kind: 'chain', start: printTerm(c), steps: steps.map(({ rel, expr, reason }) => ({ rel, expr, reason })) });
+  }
+  return out;
+}
+
+/**
+ * The points at which to take `∀ x ∈ D . P`, with the premise that the point is in D:
+ * points where the operation changes D itself (dom f′ / S′), and points where it changes
+ * a function the body applies at x, if the point is in D by the preconditions, the
+ * invariant before and the unchanged variables.
+ */
+function quantPoints(ctx: Ctx, after: ReturnType<typeof afterState>, x: string, D: Term, body: Term): { p: Point; at: Premise }[] {
+  const out: { p: Point; at: Premise }[] = [];
+  const seen = new Set<string>();
+  const onDom = D.kind === 'unop' && D.op === 'dom' && D.arg.kind === 'name' && ctx.primed.has(D.arg.name);
+  const target = onDom ? (D as Extract<Term, { kind: 'unop' }>).arg : D;
+  const atText = (p: Point) => printTerm(mk.rel('∈', p.x, D));
+  if (target.kind === 'name' && ctx.primed.has(target.name)) {
+    for (const p of after.points) {
+      if (p.v !== target.name || (onDom ? !p.e : !!p.e) || seen.has(key(p.x))) continue;
+      seen.add(key(p.x));
+      out.push({ p, at: { text: atText(p), reason: p.premise.reason, src: p.premise.src } });
+    }
+  }
+  const applied = new Set<string>();
+  const apps: Extract<Term, { kind: 'apply' }>[] = [];
+  collectApps(body, new Set(), apps);
+  for (const a of apps) if (a.fn.kind === 'name' && a.arg.kind === 'name' && a.arg.name === x) applied.add(a.fn.name);
+  let prover: Prover | null = null;
+  for (const p of after.points) {
+    if (!p.e || !applied.has(p.v) || seen.has(key(p.x))) continue;
+    prover ??= new Prover({
+      atoms: [...ownAtoms(ctx, ctx.lines), ...invAtoms(ctx, false), ...xiAtoms(ctx)],
+      decls: ctx.decls,
+      givenSets: ctx.given,
+      laws: lawEnv(ctx),
+    });
+    const proof = prover.mem(p.x, D);
+    if (!proof) continue;
+    seen.add(key(p.x));
+    const reason = proof.map((q) => `${q.text} (${q.src === 'frame' ? 'unchanged' : q.reason})`).join(', ') || 'by its type';
+    out.push({ p, at: { text: atText(p), reason, src: 'own' } });
+  }
+  return out;
+}
+
+/** A prover over the invariant before only (what is already true, not what the operation demands). */
+const beforeProver = (ctx: Ctx) =>
+  new Prover({ atoms: invAtoms(ctx, false), decls: ctx.decls, givenSets: ctx.given, laws: lawEnv(ctx) });
+
+/** Does an atomic predicate (∈, ∉, ⊆) follow from what the prover knows? */
+function followsFrom(prover: Prover, t: Term): boolean {
+  const v = view(t);
+  if (!v) return false;
+  if (v.k === 'mem') return !!prover.mem(v.x, v.s);
+  if (v.k === 'notmem') return !!prover.notMem(v.x, v.s);
+  if (v.k === 'sub' && !v.strict) return !!prover.sub(v.a, v.b);
+  return false;
+}
+
+/** What the invariant before says at the point x₀ (∀ instances, if x₀ is in the set), by key. */
+function beforeAt(ctx: Ctx, x0: Term): Map<string, Premise> {
+  const known = new Map<string, Premise>();
+  const prover = new Prover({
+    atoms: [...ownAtoms(ctx, ctx.lines, true), ...invAtoms(ctx, false)],
+    decls: ctx.decls,
+    givenSets: ctx.given,
+    laws: lawEnv(ctx),
+  });
+  for (const c of ctx.inv) {
+    known.set(key(c), { text: printTerm(c), reason: 'invariant before', src: 'inv' });
+    if (c.kind !== 'quant' || c.q !== '∀' || c.pred || c.decls.length !== 1 || c.decls[0].names.length !== 1) continue;
+    if (!prover.mem(x0, c.decls[0].type)) continue;
+    const inst = substitute(c.body, new Map([[c.decls[0].names[0].name, x0]]));
+    for (const k of conjuncts(inst)) {
+      known.set(key(k), { text: printTerm(k), reason: `invariant before, at ${printTerm(x0)}`, src: 'inv' });
+    }
+  }
+  return known;
+}
+
+/**
+ * Split a condition along ∪ / displays (equivalences) and drop the parts that are known
+ * already. Null if nothing is left.
+ */
+function splitAndDrop(t: Term, known: Map<string, Premise>, prover?: Prover): { result: Term; changed: boolean; dropped: Premise[] } | null {
+  let list = conjuncts(t);
+  let changed = false;
+  for (let round = 0; round < 6; round++) {
+    let any = false;
+    list = list.flatMap((c) => {
+      const r = splitStep(c);
+      if (r) any = true;
+      return r ? r.parts : [c];
+    });
+    if (!any) break;
+    changed = true;
+  }
+  const dropped = list.flatMap((c) => (known.has(key(c)) ? [known.get(key(c))!] : []));
+  const kept = list.filter((c) => !known.has(key(c)) && !(prover && followsFrom(prover, c)));
+  if (!kept.length) return null;
+  if (!changed && !dropped.length) return { result: t, changed: false, dropped: [] };
+  return { result: andOf(kept), changed: true, dropped };
+}
+
+/**
+ * One equivalence that splits a predicate into simpler ones:
+ *   A ∪ B ⊆ C ⇔ A ⊆ C ∧ B ⊆ C        {a, b} ⊆ C ⇔ a ∈ C ∧ b ∈ C
+ *   (A ∪ B) ∩ C = ∅ ⇔ A ∩ C = ∅ ∧ B ∩ C = ∅   {a} ∩ C = ∅ ⇔ a ∉ C   (also with C first)
+ */
+function splitStep(t: Term): { parts: Term[]; reason: string } | null {
+  if (t.kind !== 'rel') return null;
+  if (t.op === '⊆') {
+    const ops = unionOperands(t.left);
+    if (ops.length > 1) return { parts: ops.map((a) => mk.rel('⊆', a, t.right)), reason: 'fact about ⊆' };
+    if (t.left.kind === 'setDisplay' && t.left.elems.length) return { parts: t.left.elems.map((e) => mk.rel('∈', e, t.right)), reason: 'fact about ⊆' };
+    return null;
+  }
+  if (t.op === '=' && (isEmptySet(t.left) || isEmptySet(t.right))) {
+    const inter = isEmptySet(t.right) ? t.left : t.right;
+    if (inter.kind !== 'binop' || inter.op !== '∩') return null;
+    for (const [A, C, rebuild] of [
+      [inter.left, inter.right, (a: Term) => mk.bin('∩', a, inter.right)],
+      [inter.right, inter.left, (a: Term) => mk.bin('∩', inter.left, a)],
+    ] as [Term, Term, (a: Term) => Term][]) {
+      const ops = unionOperands(A);
+      if (ops.length > 1) return { parts: ops.map((a) => mk.rel('=', rebuild(a), mk.empty())), reason: 'fact about ∩' };
+      if (A.kind === 'setDisplay' && A.elems.length) return { parts: A.elems.map((e) => mk.rel('∉', e, C)), reason: 'fact about ∩' };
+    }
+  }
+  return null;
+}
+
+// ── equalities forced by total functions (the → vs ⇸ slip) ──────────────────────
+
+/** "every patient is in patients" */
+const everyIn = (X: string, S: string) => `every ${X.toLowerCase()} is in ${S}`;
+
+interface Forced {
+  f: string;
+  X: string;
+  S: string;
+  /** The invariant conjunct `dom f ⊆ S` (or `dom f = S`), printed. */
+  via: string;
+}
+
+/**
+ * State sets the invariant forces to be a whole given set through a total function:
+ * f : X → Y and dom f ⊆ S (or dom f = S) with S : ℙ X give S = X. Usually a modelling
+ * slip (→ instead of ⇸), so it is worth showing.
+ */
+function forcedEqualities(ctx: Ctx): Forced[] {
+  const out: Forced[] = [];
+  const conjs = ctx.s.role === 'state' ? ctx.lines.flatMap((l) => l.conj) : ctx.inv;
+  for (const c of conjs) {
+    if (c.kind !== 'rel' || (c.op !== '⊆' && c.op !== '=')) continue;
+    for (const [D, S] of c.op === '=' ? [[c.left, c.right], [c.right, c.left]] : [[c.left, c.right]]) {
+      if (D.kind !== 'unop' || D.op !== 'dom' || D.arg.kind !== 'name' || S.kind !== 'name') continue;
+      const df = ctx.decls.get(D.arg.name);
+      const dS = ctx.decls.get(S.name);
+      if (!df || df.kind !== 'binop' || df.op !== '→' || df.left.kind !== 'name' || !ctx.given.has(df.left.name)) continue;
+      if (!dS || dS.kind !== 'unop' || dS.op !== 'ℙ' || key(dS.arg) !== key(df.left)) continue;
+      if (!out.some((o) => o.S === S.name)) out.push({ f: D.arg.name, X: df.left.name, S: S.name, via: printTerm(c) });
+    }
+  }
+  return out;
+}
+
+/** State step: show `S = X` when a total function forces it. */
+function forcedFacts(ctx: Ctx): InferredFact[] {
+  if (ctx.s.role !== 'state') return [];
+  return forcedEqualities(ctx).map((fc) => {
+    const text = `${fc.S} = ${fc.X}`;
+    return {
+      schemaId: ctx.s.id,
+      kind: 'implied' as const,
+      text,
+      note: everyIn(fc.X, fc.S),
+      derivation: {
+        kind: 'facts' as const,
+        premises: [
+          { text: `dom ${fc.f} = ${fc.X}`, reason: `${fc.f} is total (→)` },
+          { text: fc.via, reason: 'invariant' },
+          { text: `${fc.S} ⊆ ${fc.X}`, reason: `declaration of ${fc.S}` },
+        ],
+        conclusion: text,
+      },
+    };
+  });
+}
+
+/**
+ * Make a proof that went through a total function readable: `dom f = X` [f is total],
+ * `dom f ⊆ S` [invariant], then the step `S = X` it implies, then the rest.
+ */
+function explainForced(ctx: Ctx, premises: Premise[]): { premises: Premise[]; forced?: Forced } {
+  for (const fc of forcedEqualities(ctx)) {
+    const total = premises.find((p) => p.text === `dom ${fc.f} = ${fc.X}` && p.src === 'decl');
+    const via = premises.find((p) => p.text === fc.via);
+    if (!total || !via) continue;
+    const eq: Premise = { text: `${fc.S} = ${fc.X}`, reason: `so ${everyIn(fc.X, fc.S)}`, src: 'inv' };
+    const rest = premises.filter((p) => p !== total && p !== via);
+    return { premises: [total, via, eq, ...rest], forced: fc };
+  }
+  return { premises };
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────────
@@ -471,6 +907,7 @@ function followsMessage(ctx: Ctx, premises: Premise[]): string {
   const decls = premises.filter((p) => p.src === 'decl');
   const parts: string[] = own.length <= 2 ? own : ['the other predicates'];
   if (premises.some((p) => p.src === 'xi')) parts.push(ctx.importText);
+  if (premises.some((p) => p.src === 'frame')) parts.push('that unmentioned variables stay unchanged');
   if (premises.some((p) => p.src === 'inv')) parts.push('the state invariant');
   if (decls.length === 1 && parts.length === 0) return `The declaration ${q(decls[0].text)} already says this.`;
   if (decls.length === 1) parts.push(`the declaration ${q(decls[0].text)}`);
@@ -479,9 +916,11 @@ function followsMessage(ctx: Ctx, premises: Premise[]): string {
 }
 
 function factsFlag(ctx: Ctx, l: Line, premises: Premise[], message?: string): Flag {
+  const ex = explainForced(ctx, premises);
+  const forcedMsg = ex.forced && `Already true: ${ex.forced.f} is total, so ${everyIn(ex.forced.X, ex.forced.S)} (${ex.forced.S} = ${ex.forced.X}).`;
   return {
-    message: message ?? followsMessage(ctx, premises),
-    derivation: { kind: 'facts', premises: strip(premises), conclusion: printTerm(l.term) },
+    message: message ?? forcedMsg ?? followsMessage(ctx, premises),
+    derivation: { kind: 'facts', premises: strip(ex.premises), conclusion: printTerm(l.term) },
   };
 }
 
@@ -503,10 +942,33 @@ function redundancy(ctx: Ctx): ZDiagnostic[] {
       checkMembership(ctx, l, avail);
     if (!f) continue;
     flagged.add(l.i);
-    out.push(diagnostic(ctx, l, f));
+    const note = frameNote(ctx, l);
+    out.push(diagnostic(ctx, l, note ? { ...f, message: `${f.message} ${note}` } : f));
   }
   return out.reverse();
 }
+
+/**
+ * A redundant line of a Δ operation that is the only one mentioning v′: deleting it
+ * would add v′ = v (frame convention), keeping it lets v change. Say so. (Variables that
+ * the invariant determines from the other mentioned ones are not frozen by the frame
+ * convention, as in index.ts framePreds; see frame.ts.)
+ */
+function frameNote(ctx: Ctx, l: Line): string | null {
+  if (ctx.s.role !== 'operation' || ctx.s.imports !== 'Δ' || !ctx.doc) return null;
+  const text = ctx.doc.preds;
+  const { from, to } = lineSpan(text, l.term.span);
+  if (to > text.length) return null;
+  const here = namesIn(text.slice(from, to));
+  const rest = namesIn(text.slice(0, from) + '\n' + text.slice(to));
+  const decls = new Map(ctx.stateVars.flatMap((v) => (ctx.decls.has(v) ? [[v, ctx.decls.get(v)!] as const] : [])));
+  const frozen = new Set(frozenVars(ctx.stateVars, (v) => rest.has(v + '′'), determinations(ctx.inv, decls)));
+  const vars = ctx.stateVars.filter((v) => here.has(v + '′') && frozen.has(v));
+  if (!vars.length) return null;
+  return `It is also the only line with ${listText(vars.map((v) => v + '′'))}, so ${listText(vars)} may change here.`;
+}
+
+const namesIn = (text: string) => new Set(lex(text).flatMap((t) => (t.kind === 'ident' ? [t.value] : [])));
 
 function diagnostic(ctx: Ctx, l: Line, f: Flag): ZDiagnostic {
   const { from, to } = lineSpan(ctx.doc?.preds, l.term.span);
@@ -678,7 +1140,11 @@ function checkEffect(ctx: Ctx, l: Line, avail: Line[]): Flag | null {
   return null;
 }
 
-/** (h) Init: `w = c` that the other Init lines and the invariant already imply. */
+/**
+ * (h) Init: `w = c` (or `dom w = c`, `ran w = c`) that the other Init lines and the
+ * invariant already imply. Both directions are checked, so that of two equivalent lines
+ * (`owner = ∅`, `dom owner = ∅`) the later one is marked.
+ */
 function checkInit(ctx: Ctx, l: Line, avail: Line[]): Flag | null {
   if (ctx.s.role !== 'init' || l.conj.length !== 1) return null;
   const names = new Set(ctx.initNames ?? []);
@@ -688,9 +1154,22 @@ function checkInit(ctx: Ctx, l: Line, avail: Line[]): Flag | null {
     [v.a, v.b],
     [v.b, v.a],
   ]) {
-    if (lhs.kind !== 'name' || !names.has(lhs.name) || mentions(rhs, names)) continue;
-    const val = initValues(ctx, avail).get(lhs.name);
-    if (val && !val.direct && key(val.value) === key(rhs)) return factsFlag(ctx, l, val.premises);
+    const t = initTarget(lhs, names);
+    if (!t || mentions(rhs, names)) continue;
+    const val = initValues(ctx, avail).get(t.name);
+    if (!val) continue;
+    if (t.wrap === 'none') {
+      if (!val.direct && key(val.value) === key(rhs)) return factsFlag(ctx, l, val.premises);
+      continue;
+    }
+    // dom w / ran w from the value of w
+    let cur = mk.unop(t.wrap, val.value);
+    const laws: Premise[] = [];
+    for (const st of simplify(cur, lawEnv(ctx))) {
+      cur = st.term;
+      laws.push(lawPremise(st.law.statement, st.law.reason));
+    }
+    if (key(cur) === key(rhs)) return factsFlag(ctx, l, dedupe([...val.premises, ...laws]));
   }
   return null;
 }
@@ -716,4 +1195,194 @@ function checkMembership(ctx: Ctx, l: Line, avail: Line[]): Flag | null {
   const proof = v.k === 'mem' ? prover.mem(v.x, v.s) : v.k === 'notmem' ? prover.notMem(v.x, v.s) : prover.sub(v.a, v.b);
   if (!proof || proof.length === 0) return null;
   return factsFlag(ctx, l, proof);
+}
+
+// ── proving step goals (used by the goal checker) ──────────────────────────────
+
+/** A proof of a goal in one step, and whether it only needs the step's own content. */
+export interface GoalProof {
+  derivation: Derivation;
+  /**
+   * Only own lines, declarations and Ξ were used (no state invariant, frame convention,
+   * or facts derived from them).
+   */
+  stated: boolean;
+}
+
+interface Supported {
+  term: Term;
+  /** What supports it (a single premise for a written line). */
+  premises: Premise[];
+}
+
+/**
+ * Try to prove `goal` (in the spec's own names) in the schema `schemaId` from the
+ * step's premises: own lines and declarations, Ξ, the state invariant before / after,
+ * the frame convention, and what the inference derives from them (effects, initial
+ * values, guarantees). Conjunct by conjunct; null if some conjunct is not proven.
+ */
+export function proveGoal(spec: SpecDoc, an: Analysis, schemaId: string, goal: Term): GoalProof | null {
+  const s = an.byId[schemaId];
+  if (!s) return null;
+  const doc = [spec.state, ...(spec.init ? [spec.init] : []), ...spec.operations].find((d) => d.id === schemaId);
+  try {
+    const ctx = context(an, s, doc);
+    const known = knownFacts(ctx);
+    const atoms: Atom[] = known.map((k) => ({ term: k.term, reason: k.premises[0].reason, src: k.premises[0].src }));
+    const prover = new Prover({ atoms, decls: ctx.decls, givenSets: ctx.given, laws: lawEnv(ctx) });
+    const byKey = new Map<string, Supported>();
+    for (const k of known) if (!byKey.has(key(k.term))) byKey.set(key(k.term), k);
+    const premises: Premise[] = [];
+    for (const c of conjuncts(goal)) {
+      const p = proveConjunct(ctx, c, byKey, prover);
+      if (!p) return null;
+      premises.push(...p);
+    }
+    const all = dedupe(premises);
+    return {
+      derivation: { kind: 'facts', premises: strip(all), conclusion: printTerm(goal) },
+      stated: all.every((p) => p.src === 'own' || p.src === 'decl' || p.src === 'xi' || p.src === 'law'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function proveConjunct(ctx: Ctx, c: Term, byKey: Map<string, Supported>, prover: Prover): Premise[] | null {
+  const direct = byKey.get(key(c)) ?? weakerKnown(c, byKey);
+  if (direct) return direct.premises;
+  // A ∨ B from A (or from B)
+  if (c.kind === 'logic' && c.op === '∨') {
+    for (const side of [c.left, c.right]) {
+      const ps: Premise[] = [];
+      let ok = true;
+      for (const sc of conjuncts(side)) {
+        const p = proveConjunct(ctx, sc, byKey, prover);
+        if (!p) {
+          ok = false;
+          break;
+        }
+        ps.push(...p);
+      }
+      if (ok) return ps;
+    }
+    return null;
+  }
+  if (c.kind === 'quant') {
+    // pairs of a function: (x ↦ y) ∈ f means y = f(x)
+    const red = reduceByFunctions(c, (n) => {
+      const d = ctx.decls.get(n);
+      return d?.kind === 'binop' && (d.op === '⇸' || d.op === '→');
+    });
+    if (red) {
+      const declared = red.used.map((f) => declPremise(f, ctx.decls.get(f)!));
+      if (red.trivial) return declared;
+      for (const r of red.rest) {
+        const known = byKey.get(key(r)) ?? weakerKnown(r, byKey);
+        if (known) return [...declared, ...known.premises];
+        if (r.kind !== 'quant' && !(r.kind === 'logic' && r.op === '⇒')) {
+          const ps: Premise[] = [];
+          for (const rc of conjuncts(r)) {
+            const p = proveConjunct(ctx, rc, byKey, prover);
+            if (!p) return null;
+            ps.push(...p);
+          }
+          return [...declared, ...ps];
+        }
+      }
+    }
+  }
+  if (c.kind === 'rel' && c.op === '=' && key(c.left) === key(c.right)) return [];
+  const v = view(c);
+  if (v?.k === 'mem') {
+    const proof = prover.mem(v.x, v.s);
+    if (proof) return proof;
+    // (x ↦ y) ∈ f from y = f(x): the application is defined, and f(x) is the image of x
+    const pp = pairParts(v.x);
+    if (pp && v.s.kind === 'name') {
+      const app: Term = { kind: 'apply', fn: v.s, arg: pp[0], span: SPAN };
+      const eq = byKey.get(key(mk.rel('=', pp[1], app)));
+      const dom = eq && proveConjunct(ctx, mk.rel('∈', pp[0], mk.unop('dom', v.s)), byKey, prover);
+      if (eq && dom) return [...eq.premises, ...dom];
+    }
+    return null;
+  }
+  if (v?.k === 'notmem') return prover.notMem(v.x, v.s);
+  if (v?.k === 'sub' && !v.strict) return prover.sub(v.a, v.b);
+  if (v?.k === 'eq') {
+    // both sides become the same once the unchanged variables (v′ = v) are put in
+    const same: Premise[] = [];
+    const sub = new Map<string, Term>();
+    for (const k of byKey.values()) {
+      const t = k.term;
+      if (t.kind === 'rel' && t.op === '=' && t.left.kind === 'name' && t.right.kind === 'name' && t.left.name === t.right.name + '′') {
+        if (!sub.has(t.left.name)) {
+          sub.set(t.left.name, t.right);
+          if (mentions(c, new Set([t.left.name]))) same.push(...k.premises);
+        }
+      }
+    }
+    if (sub.size && key(substitute(v.a, sub)) === key(substitute(v.b, sub))) return same;
+    // A = B from A ⊆ B and B ⊆ A
+    const ab = prover.sub(v.a, v.b);
+    const ba = ab && prover.sub(v.b, v.a);
+    if (ab && ba) return [...ab, ...ba];
+  }
+  return null;
+}
+
+/**
+ * ∀ x . A ∧ B ⇒ C from a known ∀ x . A ⇒ C: extra assumptions only make the statement
+ * weaker. Tries the goal with some of its assumptions left out (at most 4 of them).
+ */
+function weakerKnown(c: Term, byKey: Map<string, Supported>): Supported | undefined {
+  if (c.kind !== 'quant' || c.q !== '∀') return undefined;
+  const body: Term = c.pred ? { kind: 'logic', op: '⇒', left: c.pred, right: c.body, span: SPAN } : c.body;
+  if (body.kind !== 'logic' || body.op !== '⇒') return undefined;
+  const ante = conjuncts(body.left);
+  if (ante.length > 4) return undefined;
+  for (let mask = (1 << ante.length) - 2; mask >= 0; mask--) {
+    const kept = ante.filter((_, i) => mask & (1 << i));
+    const weaker: Term = kept.length
+      ? { ...body, left: kept.reduce((a, b) => ({ kind: 'logic', op: '∧', left: a, right: b, span: SPAN })) }
+      : body.right;
+    const known = byKey.get(key({ kind: 'quant', q: '∀', decls: c.decls, body: weaker, span: c.span }));
+    if (known) return known;
+  }
+  return undefined;
+}
+
+/** Everything known in a step, with its support. Own lines first. */
+function knownFacts(ctx: Ctx): Supported[] {
+  const one = (term: Term, reason: string, src: PremiseSource): Supported => ({ term, premises: [{ text: printTerm(term), reason, src }] });
+  const out: Supported[] = [];
+  for (const a of ownAtoms(ctx, ctx.lines)) out.push(one(a.term, a.reason, 'own'));
+  for (const t of ctx.xi) out.push(one(t, `Ξ${ctx.stateName}`, 'xi'));
+  if (ctx.s.role !== 'state') {
+    for (const a of invAtoms(ctx, false)) out.push(one(a.term, a.reason, 'inv'));
+    for (const a of invAtoms(ctx, true)) out.push(one(a.term, a.reason, 'inv'));
+  }
+  for (const t of ctx.frame) out.push(one(t, NOT_MENTIONED, 'frame'));
+  if (ctx.s.role === 'init' && ctx.initNames) {
+    // initial values the invariant implies (allergic = ∅ from patients = ∅)
+    for (const [name, iv] of initValues(ctx, ctx.lines)) {
+      if (iv.direct) continue;
+      out.push({ term: mk.rel('=', mk.name(name), iv.value), premises: iv.premises.map((p) => (p.src === 'own' ? p : { ...p, src: p.src === 'law' ? 'law' : 'inv' })) });
+    }
+  }
+  if (ctx.s.role === 'operation' && ctx.s.imports === 'Δ') {
+    // effects derived from the invariant, and the guarantees
+    const defs = frameDefs(ctx, explicitDefs(ctx, ctx.lines));
+    for (const v of ctx.stateVars) {
+      const vP = v + '′';
+      if (defs.has(vP)) continue;
+      const eff = deriveEffect(ctx, vP, defs);
+      if (eff) out.push(one(mk.rel('=', mk.name(vP), eff.result), 'derived from the invariant', 'inv'));
+    }
+    for (const f of guaranteedFacts(ctx)) {
+      const t = parseTerm(f.text).term;
+      if (t) for (const c of conjuncts(t)) out.push(one(c, 'guaranteed by the invariant', 'inv'));
+    }
+  }
+  return out;
 }

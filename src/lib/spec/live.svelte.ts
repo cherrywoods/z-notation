@@ -8,7 +8,8 @@ import type { SectionPart, SpecDoc, ZDiagnostic } from './model';
 import { store } from './store.svelte';
 import { visibleDiagnostics } from './helpers';
 import { goalsOf, referenceSpecOf, stepGoalsOf } from './topics';
-import { checkGoals, type GoalStatus } from '../z/goals';
+import type { GoalStatus } from '../z/goals';
+import { GoalRunner } from './goalRunner';
 
 export type { GoalStatus };
 
@@ -34,12 +35,51 @@ class Live {
   /** Goal results of the analysed spec by step id (null: not checked yet). */
   goals = $state.raw<{ topicId: string; byStep: Record<string, GoalStatus[]> } | null>(null);
 
+  /**
+   * Example seeds per step ('state', 'init', op ids). The example world builds up step
+   * by step: carriers come from the Types step, the state example from the State step
+   * (operations run on it), and a seed changes only when its own step regenerates.
+   * Seeds and modes belong to the open doc: another topic or a reset starts afresh, and
+   * a removed step forgets its own (a re-added Operation3 gets the same id).
+   */
+  seeds = $state<Record<string, number>>({});
+  /** Example mode per operation ('applicable' or the 'blocked' case). */
+  modes = $state<Record<string, 'applicable' | 'blocked'>>({});
+
+  #forget(ids: string[] | null) {
+    if (!ids) {
+      this.seeds = {};
+      this.modes = {};
+      return;
+    }
+    for (const id of ids) {
+      delete this.seeds[id];
+      delete this.modes[id];
+    }
+  }
+
+  /** The step's seed: a stable default per step until the step regenerates. */
+  seedFor(stepId: string): number {
+    const s = this.seeds[stepId];
+    if (s !== undefined) return s;
+    let h = 2166136261;
+    for (const ch of stepId) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+    return h % 2 ** 31;
+  }
+
+  regenerate(stepId: string) {
+    this.seeds[stepId] = Math.floor(Math.random() * 2 ** 31);
+  }
+
   #timer: ReturnType<typeof setTimeout> | undefined;
   #lastJson = '';
   #cancelGoals: (() => void) | undefined;
   #goalRun = 0;
+  /** Goal checks run in a Web Worker (they can take a second). */
+  #goalRunner = new GoalRunner();
 
   constructor() {
+    store.onStepsGone((ids) => this.#forget(ids));
     $effect.root(() => {
       $effect(() => {
         const doc = store.current;
@@ -78,7 +118,10 @@ class Live {
     this.#scheduleGoals(snapshot, an);
   }
 
-  /** Goals are checked when the browser is idle; results of an older spec are dropped. */
+  /**
+   * Goals are checked off the main thread, started when the browser is idle; results of
+   * an older spec are dropped. The goal lists update when the results arrive.
+   */
   #scheduleGoals(spec: SpecDoc, an: Analysis | null) {
     this.#cancelGoals?.();
     const run = ++this.#goalRun;
@@ -88,13 +131,12 @@ class Live {
     if (!an || !goals || !reference) return;
     this.#cancelGoals = idle(() => {
       if (run !== this.#goalRun) return;
-      try {
-        const byStep = checkGoals(spec, an, reference, goals);
-        if (run !== this.#goalRun) return;
-        this.goals = { topicId: spec.topicId, byStep };
-      } catch (e) {
-        console.error('[live] goal check failed', e);
-      }
+      this.#goalRunner.check({ spec, reference, goals }, an).then(
+        (byStep) => {
+          if (byStep && run === this.#goalRun) this.goals = { topicId: spec.topicId, byStep };
+        },
+        (e) => console.error('[live] goal check failed', e),
+      );
     });
   }
 
@@ -106,7 +148,10 @@ class Live {
     if (!list.length) return [];
     const r = this.goals; // read first: components subscribe before the first result
     const done = r && r.topicId === topicId ? r.byStep[stepId] : undefined;
-    return list.map((g, i) => ({ text: g.text, achieved: !!done?.[i]?.achieved }));
+    // full status (via, evidence) for the template's goals; until the first result they
+    // show as open. The checker's automatic goals (e.g. "Runs whenever it should") follow.
+    const own = list.map((g, i): GoalStatus => (done?.[i]?.text === g.text ? done[i] : { text: g.text, achieved: false }));
+    return done ? [...own, ...done.slice(list.length)] : own;
   }
 
   diagnosticsFor(schemaId: string, part: SectionPart): ZDiagnostic[] {

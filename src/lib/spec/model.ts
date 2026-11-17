@@ -27,6 +27,8 @@ export interface SchemaDoc {
 export interface SpecDoc {
   /** Topic id (template id, or 'custom'). */
   topicId: string;
+  /** Revision of the template it was made from (missing = 1; see topics.ts revisionOf). */
+  revision?: number;
   /** Human title of the system, e.g. 'Medication Prescribing'. */
   title: string;
   /** Own topic only: the student's short description of the system (System step). */

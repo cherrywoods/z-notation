@@ -24,7 +24,7 @@
     </svg>
   </button>
   <span class="url" title={url}>{shown}</span>
-  <button type="button" class="off" onclick={() => presenter.set(false)} aria-label="Leave presenter mode" title="Leave presenter mode (P)">
+  <button type="button" class="off" onclick={() => presenter.set(false)} aria-label="Leave presenter mode" title="Leave presenter mode">
     <X size={14} strokeWidth={2} />
   </button>
 </footer>

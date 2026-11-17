@@ -18,10 +18,13 @@ as on the slides, unicode only.
   *Phones*: a horizontal snap carousel instead of the ring: the centred bubble is large
   and selected, its neighbours peek in partially from left and right (smaller, faded);
   swipe or tap a neighbour to move it to the centre. Must feel native and obvious.
-* **Hidden presentation mode**: shows a big QR code and the page URL (origin + path,
-  no hash) so students can join late. Trigger: key `p` when not typing, a very faint
-  icon in a corner of the start page, or `#/present`. `Esc` closes.
-* **Tutorial**: a sequence of views: **Types → State → Operations (one view per
+* **Hidden presenter mode** (for the projector): the only switch is a very faint QR icon
+  in a corner of the start page (no key, no URL; an old `#/present` link just opens the
+  start page). While on, every page shows a footer with a QR code and the page URL
+  (origin + path, no hash) so students can join late, and the Z text is larger. The
+  footer's QR code opens a big QR view (`Esc` closes it); ✕ in the footer switches
+  presenter mode off. Remembered in localStorage.
+* **Tutorial**: a sequence of views: **System → Types → State → Operations (one view per
   operation) → Init (if the system has one) → Specification**. Main motion: big arrows bottom-right
   (next) / bottom-left (back). A de-emphasised step row at the top (`Types · State ·
   ViewPrescriptions Ξ · Prescribe Δ · + · Spec`) allows jumping; `+` adds an
@@ -49,7 +52,7 @@ as on the slides, unicode only.
   inserts `X ⇸ Y` with X and Y as highlighted tab-stop fields.
 * **Typing**: ASCII shortcuts are auto-replaced (only ASCII, no LaTeX names):
   `->` →, `-|>` ⇸, `<->` ↔, `|->` ↦, `PP` ℙ, `NN` ℕ, `ZZ` ℤ, `/\` ∧, `\/` ∨, `=>` ⇒,
-  `<=>` ⇔, `<=` ≤, `>=` ≥, `/=` ≠, `<:` ⊆, `{}` ∅, `'` ′, `@` •, `~` ¬, words `in`,
+  `<=>` ⇔, `<=` ≤, `>=` ≥, `/=` ≠, `<:` ⊆, `{}` ∅, `'` ′, `@` ., `~` ¬, words `in`,
   `notin`, `union`, `inter`, `forall`, `exists`, `Delta…`/`Xi…`. Table in
   `src/lib/z/symbols.ts`. Ctrl+Z undoes a replacement.
 * **Colours**: GitHub "Light Colorblind" syntax palette (tokens in `src/app.css`):
@@ -62,10 +65,14 @@ as on the slides, unicode only.
 * **Spec view + PDF**: final view with the whole spec typeset (given sets, schema boxes);
   "Save as PDF" uses `window.print()` with print CSS.
 * **Own topic**: blank skeleton titled with the topic; default given sets available
-  (NAME, DATE, …); empty Ξ and Δ operation tabs.
+  (NAME, DATE, …); empty Ξ and Δ operation tabs. The state schema is named after the
+  title (Parking Garage → ParkingGarage); renaming the topic on the start page keeps the
+  spec, and the state name follows unless the student renamed it.
 * **Example values**: given sets from templates have value pools; unknown given sets get
   `lowercase name + 1, 2, 3` (TRAIN → train1, train2, …).
-* **Persistence**: per-topic autosave in localStorage + reset.
+* **Persistence**: per-topic autosave in localStorage + reset. A topic is saved only once
+  something changed (an own topic named on the start page counts; one opened by a link
+  does not). If storage is blocked or full, the work stays for the session.
 
 ## Z language scope (agreed with the lecturer)
 
@@ -73,8 +80,8 @@ In: given sets `[A, B]`; schema boxes (name in the top rule, declarations above 
 line, predicates below, one per line = conjunction); ℙ; ↔, ⇸, → (no injections/
 surjections); ↦; dom, ran; function application `f(x)` (also
 juxtaposition `f x`); ∈ ∉ ⊆ ⊂ ∪ ∩ ∖ ∅ #; set display `{a, b}`; set comprehension
-`{x : S | P}` / `{x ∈ S | P}` (+ optional `• e`); tuples, ×; ℕ ℕ₁ ℤ ℝ, `+ - * div mod`,
-`< ≤ > ≥` (ℝ with decimals); `= ≠`; `∧ ∨ ¬ ⇒ ⇔`; `∀ x : S; y : T | P • Q`, `∃ …`; Δ/Ξ (structured
+`{x ∈ S | P}` (+ optional `. e`); tuples, ×; ℕ ℕ₁ ℤ, `+ - * div mod`,
+`< ≤ > ≥` (whole numbers only); `= ≠`; `∧ ∨ ¬ ⇒ ⇔`; `∀ x ∈ S; y ∈ T | P . Q`, `∃ x ∈ S . P` (a plain period instead of •; `•`, `@` and `x : S` are still accepted); Δ/Ξ (structured
 import); decorations ′ ? !; optional Init schema (first declaration line is the state
 schema name, predicates on the unprimed state, as on the lecture slides; `State′` with primed
 predicates is accepted too).
@@ -110,7 +117,7 @@ src/
   ui/
     start/        start page: ring, carousel, own-topic bubble
     shell/        tutorial layout, step row, arrows, router glue
-    present/      presentation mode (QR)
+    present/      presenter mode (QR footer, big QR view)
     steps/        Types / State / Operation / Spec views
     editor/       SchemaBox, ZEditor, SymbolLibrary
     panels/       ExamplePanel, InferencePanel
@@ -123,8 +130,10 @@ templates/      one JSON file per target system (tutorial format below)
 ```jsonc
 {
   "id": "medication",                     // = file name without .json
-  "title": "Hospital Medication Prescribing",
-  "short": "Medication",                  // bubble label, ≤ 14 characters
+  "revision": 1,                          // optional (default 1); bump it when old saves no longer fit, see below
+  "title": "Medication Prescribing",
+  "short": "Medication Prescribing",      // optional (default: title); bubble label and
+                                          // tutorial header, ≤ ~26 characters (wraps to two lines)
   "icon": "pill",                         // lucide icon name (kebab-case)
   "blurb": "Never prescribe a drug a patient is allergic to.",  // ≤ 70 chars
   "description": "…",                     // 1–3 sentences
@@ -146,6 +155,12 @@ templates/      one JSON file per target system (tutorial format below)
 
 Operation declarations start with the `ΔState` / `ΞState` line; Init's first declaration
 is the state schema name.
+
+`revision`: bump it when a change makes old saves misleading (a renamed given set or
+variable, so goals and examples no longer fit; e.g. Bank Accounts, CUSTOMER → PERSON).
+Saves record the revision; on load, a save with an older (or no) revision is moved to
+`ztut:v2:<id>:old` (`:old2` for a revision-2 save, …) and the topic starts fresh. Other
+topics' saves are not touched.
 
 ## Conventions
 

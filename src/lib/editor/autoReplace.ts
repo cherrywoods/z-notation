@@ -8,7 +8,24 @@ import { isolateHistory } from '@codemirror/commands';
 import { ASCII_GLYPH_SHORTCUTS, ASCII_WORD_SHORTCUTS } from '../z/symbols';
 import { isIdentChar, lex } from '../z/lexer';
 
-const GLYPHS = ASCII_GLYPH_SHORTCUTS; // longest first
+/**
+ * Arrows (and the relational image) that are not part of the tutorial still become
+ * their own symbol, so that the editor explains them (instead of reading `>->` as `>`
+ * and `→`). The ones that extend an in-scope arrow are completed from it (`→` + `>` →
+ * `↠`), so `->` is still replaced at once.
+ */
+const OUT_OF_SCOPE_TYPED: [string, string][] = [
+  ['(|', '⦇'],
+  ['|)', '⦈'],
+  ['>->', '↣'],
+  ['>+>', '⤔'],
+  ['>-|>', '⤔'],
+  ['→>', '↠'], // ->>
+  ['-→>', '↠'], // -->>
+  ['⇸>', '⤀'], // +->>
+  ['↣>', '⤖'], // >->>
+];
+const GLYPHS = [...ASCII_GLYPH_SHORTCUTS, ...OUT_OF_SCOPE_TYPED].sort((a, b) => b[0].length - a[0].length); // longest first
 const WORDS = new Map(ASCII_WORD_SHORTCUTS.filter(([w]) => w !== 'Delta' && w !== 'Xi'));
 const SCHEMA_WORDS = new Map<string, string>([
   ['Delta', 'Δ'],
@@ -99,6 +116,9 @@ export function normalizeAscii(text: string): string {
     let rep: string | null = null;
     if ((t.kind === 'sym' || t.kind === 'keyword') && src !== t.value && !/^(dom|ran|div|mod)$/.test(t.value)) {
       // keep `{}` as ∅, `..` stays
+      rep = t.value;
+    } else if (t.kind === 'error' && src !== t.value) {
+      // ASCII spellings of arrows outside the tutorial (`>->` → ↣), which the editor then explains
       rep = t.value;
     } else if (t.kind === 'ident' && t.decoration === '′' && src.endsWith("'")) {
       rep = src.slice(0, -1) + '′';

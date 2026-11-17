@@ -50,17 +50,24 @@ describe('printTerm', () => {
     ['−(overdraft a)', '-(overdraft(a))'],
     ['x - -3', 'x - -3'],
     ['{ b ∈ onLoan | borrower(b) = member? }', '{ b ∈ onLoan | borrower(b) = member? }'],
-    ['{x:S|P•e}', '{ x : S | P • e }'],
+    ['{x:S|P•e}', '{ x ∈ S | P . e }'],
     ['{}', '∅'],
-    ['P ∧ ∀ x : S • Q', 'P ∧ (∀ x : S • Q)'],
-    ['∀ x : S • ∃ y : T • R', '∀ x : S • ∃ y : T • R'],
-    ['∀ x, y : S; z : T | x ≠ y • z ∈ U', '∀ x, y : S; z : T | x ≠ y • z ∈ U'],
-    ['¬ ∃ x : S • P', '¬ (∃ x : S • P)'],
+    ['P ∧ ∀ x : S • Q', 'P ∧ (∀ x ∈ S . Q)'],
+    ['∀ x : S • ∃ y : T • R', '∀ x ∈ S . ∃ y ∈ T . R'],
+    ['∀ x, y : S; z : T | x ≠ y • z ∈ U', '∀ x, y ∈ S; z ∈ T | x ≠ y . z ∈ U'],
+    ['¬ ∃ x : S • P', '¬ (∃ x ∈ S . P)'],
     ['1..10', '1 .. 10'],
     ['x = 25 + -15', 'x = 25 + -15'],
     ['-(5)', '-(5)'],
     ['true ∨ false', 'true ∨ false'],
   ])('%s  ⟶  %s', (src, expected) => expect(canon(src)).toBe(expected));
+
+  it('prints ∀ / ∃ / { … } in the tutorial notation (∈ and a period)', () => {
+    expect(canon('forall x : S @ x in T')).toBe('∀ x ∈ S . x ∈ T');
+    expect(canon('{ x : S | x ∈ T • f(x) }')).toBe('{ x ∈ S | x ∈ T . f(x) }');
+    expect(canon('{ x : S }')).toBe('{ x ∈ S }');
+    expect(termEquals(parse(canon('{ x : S }')), parse('{ x : S }'))).toBe(true); // reads back as a comprehension
+  });
 
   it('prints declarations', () => {
     const { decls } = parseDecls('ΔLibrary\nΞ Library\nLibrary′\nbook?, x? : BOOK\nrx : PATIENT ⇸ (DRUG ⇸ ℕ₁)');
@@ -150,21 +157,21 @@ describe('rename / primeTerm / substitute', () => {
 
   it('does not rename bound variables', () => {
     expect(printTerm(primeTerm(parse('∀ onLoan : BOOK • onLoan ∈ dom borrower'), ['onLoan', 'borrower']))).toBe(
-      '∀ onLoan : BOOK • onLoan ∈ dom borrower′',
+      '∀ onLoan ∈ BOOK . onLoan ∈ dom borrower′',
     );
-    expect(printTerm(rename(parse('{ x : x | x ∈ y }'), { x: 'a', y: 'b' }))).toBe('{ x : a | x ∈ b }');
+    expect(printTerm(rename(parse('{ x : x | x ∈ y }'), { x: 'a', y: 'b' }))).toBe('{ x ∈ a | x ∈ b }');
   });
 
   it('avoids capturing a renamed variable', () => {
     // renaming y ↦ x must not let the binder ∀ x capture it
-    expect(printTerm(rename(parse('∀ x : S • x = y'), { y: 'x' }))).toBe('∀ x1 : S • x1 = x');
+    expect(printTerm(rename(parse('∀ x : S • x = y'), { y: 'x' }))).toBe('∀ x1 ∈ S . x1 = x');
   });
 
   it('substitutes terms for variables', () => {
     const sub = new Map<string, Term>([['borrower′', parse('borrower ∪ {book? ↦ member?}')]]);
     expect(printTerm(substitute(parse('onLoan′ = dom borrower′'), sub))).toBe('onLoan′ = dom (borrower ∪ {book? ↦ member?})');
     const cap = new Map<string, Term>([['y', nameTerm('n')]]);
-    expect(printTerm(substitute(parse('{ n : BOOK | n = y }'), cap))).toBe('{ n1 : BOOK | n1 = n }');
+    expect(printTerm(substitute(parse('{ n : BOOK | n = y }'), cap))).toBe('{ n1 ∈ BOOK | n1 = n }');
   });
 });
 

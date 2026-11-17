@@ -1,6 +1,6 @@
 // Turns a Z text into render pieces for ZText.svelte: the lexer's highlight spans,
 // refined for static display (value literals like 2.Feb, '==' in definitions,
-// ΔState / book? as one hover target, set display vs. comprehension braces,
+// ΔState / p? as one hover target, set display vs. comprehension braces,
 // application parentheses), plus the plain gaps in between.
 
 import { highlight, type HighlightSpan } from '../../lib/z/lexer';
@@ -15,7 +15,7 @@ export interface ZPiece {
   text: string;
   /** CSS classes; absent for plain text (whitespace, gaps). */
   cls?: string;
-  /** Sub-spans with their own classes (compound pieces such as ΔLibrary or book?). */
+  /** Sub-spans with their own classes (compound pieces such as ΔWard or p?). */
   parts?: ZPart[];
   /** Explainer id shown on hover/click. */
   explain?: string;
@@ -58,6 +58,11 @@ export function zPieces(text: string, givenSets: readonly string[] = [], ctx?: E
       out.push({ ...s, cls: 'z-punct' });
       continue;
     }
+    // The period of ∀ x ∈ S . P (also when the lexer does not know '.' yet).
+    if (s.cls === 'z-error' && t === '.') {
+      out.push({ ...s, cls: 'z-logic', explain: 'spot', ctx: baseCtx });
+      continue;
+    }
 
     // 3. '==' (is defined as) in definitions.
     if (t === '=' && next && next.from === s.to && src(next) === '=') {
@@ -66,7 +71,7 @@ export function zPieces(text: string, givenSets: readonly string[] = [], ctx?: E
       continue;
     }
 
-    // 4. Decorated identifiers (borrower′, book?, member!): one hover target.
+    // 4. Decorated identifiers (prescribed′, p?, drugs!): one hover target.
     if (
       s.explain &&
       s.cls.startsWith('z-ident') &&
@@ -134,7 +139,7 @@ export function zPieces(text: string, givenSets: readonly string[] = [], ctx?: E
       const apply =
         t === '(' && !!prev && prev.to === s.from && /^z-(ident|decorated|given)/.test(prev.cls) && !prev.cls.includes('z-schema');
       stack.push({ idx: k, ch: t, comp: false, bars: [], apply });
-    } else if (t === '|' || t === '•') {
+    } else if (t === '|' || t === '.' || t === '•' || t === '@') {
       const top = stack[stack.length - 1];
       if (top?.ch === '{') {
         top.comp = true;

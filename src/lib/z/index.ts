@@ -13,11 +13,13 @@
 import type { SchemaRole, SectionRef, SpecDoc, SchemaDoc, ZDiagnostic } from '../spec/model';
 import { sectionKey } from '../spec/model';
 import type { Decl, SchemaAst, Span, Term, VarDecl } from './ast';
-import type { Decoration } from './lexer';
+import { lex, type Decoration } from './lexer';
 import { parseDecls, parseGiven, parsePredItems, type ParseDiagnostic } from './parser';
-import { nameTerm, primeTerm, printTerm, splitName } from './print';
-import { TypeChecker, type Binding, type NameTerm, type Scope } from './typecheck';
+import { children, freeVars, nameTerm, primeTerm, printTerm, splitName } from './print';
+import { TypeChecker, typeOnlyRewrite, type Binding, type NameTerm, type Scope } from './typecheck';
 import { given, power, typeToString, type ZType } from './types';
+import { determinations, frozenVars } from './frame';
+import { key } from './infer/terms';
 
 export {
   parseGiven,
@@ -73,9 +75,10 @@ export interface PredInfo {
   term: Term;
   /**
    * 'own': a line of this schema; 'invariant' / 'invariant′': the state invariant
-   * (unprimed / primed copy); 'xi': `v′ = v` from Ξ.
+   * (unprimed / primed copy); 'xi': `v′ = v` from Ξ; 'frame': `v′ = v` for a state
+   * variable a Δ operation does not mention (the tutorial's frame convention).
    */
-  origin: 'own' | 'invariant' | 'invariant′' | 'xi';
+  origin: 'own' | 'invariant' | 'invariant′' | 'xi' | 'frame';
   /**
    * 'own': this schema's predicate section; invariants: the state schema's predicate
    * section (spans of primed copies still point at the original line). Absent for 'xi'.
@@ -159,7 +162,7 @@ export function analyseSpec(spec: SpecDoc): Analysis {
   for (const n of g.names) {
     if (givenSets.includes(n.name)) report(err(givenSec, n.span, `${q(n.name)} is declared twice.`, 'scope'));
     else givenSets.push(n.name);
-    const lookalike = NUMBER_SET_LOOKALIKES[n.name];
+    const lookalike = Object.hasOwn(NUMBER_SET_LOOKALIKES, n.name) ? NUMBER_SET_LOOKALIKES[n.name] : undefined;
     if (lookalike) report(err(givenSec, n.span, lookalike, 'scope', 'warning'));
   }
   const globals = new Map<string, Binding>(givenSets.map((n) => [n, { kind: 'given', type: power(given(n)) }]));
@@ -301,7 +304,9 @@ function unknownNameMessage(t: NameTerm, scope: Scope, ctx: Ctx, role: SchemaRol
   }
   // the same name with another decoration (book → book?, member? → member!) is the most likely fix
   const names = [...scope.keys()];
-  const special = OUT_OF_SCOPE_NAMES[name] ?? (decoration === '' && /^i?seq/.test(name) ? OUT_OF_SCOPE_NAMES.seq : undefined);
+  const special =
+    (Object.hasOwn(OUT_OF_SCOPE_NAMES, name) ? OUT_OF_SCOPE_NAMES[name] : undefined) ??
+    (decoration === '' && /^i?seq/.test(name) ? OUT_OF_SCOPE_NAMES.seq : undefined);
   if (special) return special;
   const sameBase = names.find((n) => n !== name && splitName(n).base === base);
   const suggestion = sameBase ?? closestName(name, names);
@@ -321,8 +326,8 @@ function unknownNameMessage(t: NameTerm, scope: Scope, ctx: Ctx, role: SchemaRol
  */
 const OUT_OF_SCOPE_NAMES: Record<string, string> = {
   seq: 'Sequences (‘seq’, ‘⟨ ⟩’) are not part of this tutorial.',
-  min: '‘min’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x : S • m ≤ x).',
-  max: '‘max’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x : S • x ≤ m).',
+  min: '‘min’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x ∈ S . m ≤ x).',
+  max: '‘max’ is not part of this tutorial — say it with ∀, e.g. m ∈ S ∧ (∀ x ∈ S . x ≤ m).',
   succ: '‘succ’ is not part of this tutorial — write ‘n + 1’.',
   N: 'Unknown name ‘N’ — did you mean ℕ (type NN)?',
   NN: 'Unknown name ‘NN’ — did you mean ℕ (type NN and a space)?',
@@ -394,6 +399,14 @@ function badInclude(ctx: Ctx, sec: SectionRef, d: Extract<Decl, { kind: 'include
 
 /** Check the declared set of a variable declaration and return the variables' type. */
 function declaredType(ctx: Ctx, sec: SectionRef, role: SchemaRole, d: VarDecl, vars: () => Map<string, VarInfo>): ZType {
+  // A set built from variables (`t? : dom at`) is valid Z, but the tutorial declares a
+  // type and states the rest below the line: say how, and go on with the type.
+  const known = [...ctx.stateVars, ...ctx.stateVars.map(primedCopy), ...vars().values()];
+  const rewrite = typeOnlyRewrite(d, scopeOf(ctx, known));
+  if (rewrite) {
+    ctx.report(err(sec, d.type.span, rewrite.message));
+    return rewrite.type;
+  }
   return declChecker(ctx, sec, role, vars, d).checkDeclaredSet(d.type, ctx.globals);
 }
 
@@ -437,6 +450,148 @@ function xiPreds(ctx: Ctx, scope: Scope): PredInfo[] {
     const term: Term = { kind: 'rel', op: '=', left: nameTerm(v.name + '′'), right: nameTerm(v.name), span: { from: 0, to: 0 } };
     silent.checkPredicate(term, scope);
     return { term, origin: 'xi' as const, ok: true };
+  });
+}
+
+const conj = (t: Term): Term[] => (t.kind === 'logic' && t.op === '∧' ? [...conj(t.left), ...conj(t.right)] : [t]);
+
+/** Decorated names written in a predicate text (also in lines that do not parse). */
+const namesIn = (text: string) => new Set(lex(text).flatMap((t) => (t.kind === 'ident' ? [t.value] : [])));
+
+/**
+ * The tutorial's frame convention: in a Δ operation, a state variable v whose v′ occurs
+ * in none of the operation's predicate lines stays unchanged (v′ = v). Exception: the
+ * invariant determines v from variables the operation may change (e.g. a set kept equal
+ * to dom of a function when only the function′ is set, or the complement of a changed
+ * set), where v′ = v would contradict the operation; the slides derive such values
+ * instead. See frame.ts.
+ */
+function framePreds(ctx: Ctx, doc: SchemaDoc, state: SchemaInfo, scope: Scope): PredInfo[] {
+  const mentioned = namesIn(doc.preds);
+  const vars = ctx.stateVars.map((v) => v.name);
+  const inv = state.preds.filter((p) => p.origin === 'own' && p.ok).flatMap((p) => conj(p.term));
+  const dets = determinations(inv, new Map(ctx.stateVars.map((v) => [v.name, v.declared])));
+  const silent = new TypeChecker({ section: { schemaId: doc.id, part: 'preds' }, termTypes: ctx.termTypes });
+  return frozenVars(vars, (v) => mentioned.has(v + '′'), dets)
+    .map((v) => {
+      const term: Term = { kind: 'rel', op: '=', left: nameTerm(v + '′'), right: nameTerm(v), span: { from: 0, to: 0 } };
+      silent.checkPredicate(term, scope);
+      return { term, origin: 'frame' as const, ok: true };
+    });
+}
+
+/**
+ * A Δ operation that constrains a function f′ only pointwise (`f′(x) = e`, nothing about
+ * f′ as a whole) leaves the other values of f′ open: valid Z, but rarely intended.
+ */
+function pointwiseWarnings(ctx: Ctx, doc: SchemaDoc, p: Parsed, preds: PredInfo[]): void {
+  const own = preds.filter((x) => x.origin === 'own');
+  // names in lines that do not parse: we cannot tell how they are used
+  const unparsed = new Set(p.items.filter((i) => !i.term).flatMap((i) => [...namesIn(doc.preds.slice(i.span.from, i.span.to))]));
+  for (const v of ctx.stateVars) {
+    const d = v.declared;
+    if (d.kind !== 'binop' || (d.op !== '⇸' && d.op !== '→')) continue;
+    const name = v.name + '′';
+    if (unparsed.has(name)) continue;
+    let whole = false;
+    let first: { pred: PredInfo; app: Term } | null = null;
+    const points = new Set<string>(); // keys of the x in f′(x) = e
+    for (const pr of own) {
+      if (usedWhole(pr.term, name)) whole = true;
+      for (const c of conj(pr.term)) {
+        if (c.kind !== 'rel' || c.op !== '=') continue;
+        const app = [c.left, c.right].find((x) => x.kind === 'apply' && x.fn.kind === 'name' && x.fn.name === name);
+        if (app?.kind === 'apply') points.add(key(app.arg));
+        if (app && !first) first = { pred: pr, app };
+      }
+    }
+    if (whole || !first) continue;
+    // a line ∀ y ∈ D . y ≠ x ⇒ f′(y) = f(y) pins the other values
+    const domains = pinDomains(ctx, v, preds);
+    if (own.some((pr) => conj(pr.term).some((c) => pinsOthers(c, v.name, points, domains)))) continue;
+    ctx.report(
+      err(
+        p.predSec,
+        first.pred.term.span,
+        `This only fixes ${printTerm(first.app)}. Other values of ${name} could change too — say what happens to the whole function, e.g. ${q(name + ' = …')}.`,
+        'scope',
+        'warning',
+      ),
+    );
+  }
+}
+
+/** Does `name` occur other than as the function of an application `name(x)`? */
+function usedWhole(t: Term, name: string): boolean {
+  if (t.kind === 'name') return t.name === name;
+  if (t.kind === 'apply' && t.fn.kind === 'name' && t.fn.name === name) return usedWhole(t.arg, name);
+  return children(t).some((c) => usedWhole(c, name));
+}
+
+/**
+ * Keys of the sets D that cover dom f′ (but for the points fixed one by one), so that
+ * `∀ y ∈ D . f′(y) = f(y)` leaves no value of f′ open: the source set X of f : X ⇸ Y;
+ * dom f (= dom f′) if f is total, or if the invariant says dom f = E with every state
+ * variable in E unchanged (`w′ = w`, written or by the frame convention); then E too.
+ */
+function pinDomains(ctx: Ctx, v: VarInfo, preds: PredInfo[]): Set<string> {
+  const d = v.declared;
+  if (d.kind !== 'binop') return new Set();
+  const out = new Set([key(d.left)]);
+  const dom = (n: string): Term => ({ kind: 'unop', op: 'dom', arg: nameTerm(n), span: d.span });
+  if (d.op === '→') return out.add(key(dom(v.name))).add(key(dom(v.name + '′')));
+  const unchanged = new Set<string>();
+  for (const p of preds) {
+    if (p.origin !== 'own' && p.origin !== 'frame') continue;
+    for (const c of conj(p.term)) {
+      if (c.kind !== 'rel' || c.op !== '=' || c.left.kind !== 'name' || c.right.kind !== 'name') continue;
+      if (c.left.name === c.right.name + '′') unchanged.add(c.right.name);
+      if (c.right.name === c.left.name + '′') unchanged.add(c.left.name);
+    }
+  }
+  const kDom = key(dom(v.name));
+  for (const p of preds) {
+    if (p.origin !== 'invariant' || !p.ok) continue;
+    for (const c of conj(p.term)) {
+      if (c.kind !== 'rel' || c.op !== '=') continue;
+      for (const [l, E] of [
+        [c.left, c.right],
+        [c.right, c.left],
+      ]) {
+        const fv = [...freeVars(E)];
+        if (key(l) !== kDom || fv.includes(v.name) || !fv.every((n) => !ctx.stateVarNames.has(n) || unchanged.has(n))) continue;
+        out.add(kDom).add(key(E));
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * `∀ y ∈ D . y ≠ x ⇒ f′(y) = f(y)` (also `∀ y ∈ D | y ≠ x . …`, `y ∉ {x, z}`, or no
+ * guard) with D in `domains` and every point the guard leaves out in `points`.
+ */
+function pinsOthers(c: Term, f: string, points: ReadonlySet<string>, domains: ReadonlySet<string>): boolean {
+  if (c.kind !== 'quant' || c.q !== '∀' || c.decls.length !== 1 || c.decls[0].names.length !== 1) return false;
+  if (!domains.has(key(c.decls[0].type))) return false;
+  const y = c.decls[0].names[0].name;
+  let guard = c.pred;
+  let body = c.body;
+  if (!guard && body.kind === 'logic' && body.op === '⇒') {
+    guard = body.left;
+    body = body.right;
+  }
+  const at = (t: Term, fn: string) => t.kind === 'apply' && t.fn.kind === 'name' && t.fn.name === fn && t.arg.kind === 'name' && t.arg.name === y;
+  if (body.kind !== 'rel' || body.op !== '=') return false;
+  if (!((at(body.left, f + '′') && at(body.right, f)) || (at(body.right, f + '′') && at(body.left, f)))) return false;
+  if (!guard) return true;
+  const isY = (t: Term) => t.kind === 'name' && t.name === y;
+  return conj(guard).every((g) => {
+    let left: string[] | null = null; // keys of the points g leaves out
+    const ne = g.kind === 'not' && g.arg.kind === 'rel' && g.arg.op === '=' ? g.arg : g.kind === 'rel' && g.op === '≠' ? g : null;
+    if (ne?.kind === 'rel') left = isY(ne.left) ? [key(ne.right)] : isY(ne.right) ? [key(ne.left)] : null;
+    if (g.kind === 'rel' && g.op === '∉' && isY(g.left) && g.right.kind === 'setDisplay') left = g.right.elems.map(key);
+    return !!left && left.every((k) => points.has(k));
   });
 }
 
@@ -635,6 +790,10 @@ function analyseOperation(doc: SchemaDoc, state: SchemaInfo, ctx: Ctx): SchemaIn
   if (imp) {
     preds.push(...invariantPreds(ctx, state, false, scope), ...invariantPreds(ctx, state, true, scope));
     if (imp === 'Ξ') preds.push(...xiPreds(ctx, scope));
+    if (imp === 'Δ') {
+      preds.push(...framePreds(ctx, doc, state, scope));
+      pointwiseWarnings(ctx, doc, p, preds);
+    }
   }
   return { id: doc.id, role: 'operation', name: doc.name, ast: p.ast, vars, preds, imports: imp, ok: true };
 }

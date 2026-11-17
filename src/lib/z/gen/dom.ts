@@ -5,13 +5,15 @@
 import type { Term } from '../ast';
 import { evalTerm, type Universe } from '../eval';
 import { EMPTY, int, isPair, mkSet, pair, tuple, valueEquals, valueKey, type SetValue, type Value } from '../values';
+import { spend } from './clock';
 import type { Rng } from './rng';
 
 /** How integers of a variable should look: small counts, or money-like amounts. */
 export type IntScale = 'small' | 'money';
 
 export type Dom =
-  | { k: 'finite'; elems: readonly Value[] }
+  /** `open`: the carrier of a given set that is infinite in principle (other atoms exist). */
+  | { k: 'finite'; elems: readonly Value[]; open?: string }
   /** Whole numbers in [lo, hi]: sampled from `cands`, moved by ±step. */
   | { k: 'int'; lo: number; hi: number; cands: readonly number[]; step: number }
   | { k: 'set'; base: Dom }
@@ -24,13 +26,15 @@ export type SetDom = Extract<Dom, { k: 'set' | 'rel' }>;
 export interface SetSpec {
   /** Every new element should pass all filters. */
   filters: ((e: Value) => boolean)[];
+  /** Relations: every x in the domain should pass these (they look at x only; also in `filters`). */
+  domFilters: ((x: Value) => boolean)[];
   /** Elements that should be in the set. */
   required: Value[];
   /** Relations: values that should be in the domain. */
   reqDom: Value[];
 }
 
-export const emptySpec = (): SetSpec => ({ filters: [], required: [], reqDom: [] });
+export const emptySpec = (): SetSpec => ({ filters: [], domFilters: [], required: [], reqDom: [] });
 
 const MONEY = /balance|amount|overdraft|limit|price|cost|credit|debit|salary|fee|deposit|withdraw|sum|total|budget|fund|pay|cash|money|wage|fine|charge/i;
 
@@ -51,7 +55,8 @@ export function compileDom(t: Term, u: Universe, scale: IntScale, consts: readon
     case 'name': {
       if (Object.prototype.hasOwnProperty.call(u.carriers, t.name)) {
         const elems = u.carriers[t.name];
-        return elems.length ? { k: 'finite', elems } : null;
+        if (!elems.length) return null;
+        return u.infinite?.includes(t.name) ? { k: 'finite', elems, open: t.name } : { k: 'finite', elems };
       }
       return null;
     }
@@ -175,6 +180,27 @@ function isInfinite(d: Dom): boolean {
   }
 }
 
+/**
+ * The "empty" value of a domain: ∅ for sets and (partial) relations, x ↦ ∅ for every x
+ * for a total function into sets, 0 for numbers; null if there is none.
+ */
+export function emptyValue(d: Dom): Value | null {
+  switch (d.k) {
+    case 'set':
+      return EMPTY;
+    case 'rel': {
+      if (d.fn !== 'tfun') return EMPTY;
+      const xs = enumDom(d.from);
+      const y = emptyValue(d.to);
+      return xs && y ? mkSet(xs.map((x) => pair(x, y))) : null;
+    }
+    case 'int':
+      return d.cands.includes(0) ? int(0) : null;
+    default:
+      return null;
+  }
+}
+
 /** All values of a small domain (integers: the candidate numbers), or null. */
 export function enumDom(d: Dom, limit = 400): Value[] | null {
   switch (d.k) {
@@ -196,6 +222,39 @@ export function enumDom(d: Dom, limit = 400): Value[] | null {
   }
 }
 
+/**
+ * All values of a scalar domain if the candidates are the whole domain (atoms, a small
+ * range of numbers, tuples of those), else null. Trying all of them is then a proof.
+ */
+export function completeEnum(d: Dom, limit = 400): Value[] | null {
+  switch (d.k) {
+    case 'finite':
+      return d.elems.length <= limit && isScalarDom(d) && !d.open ? [...d.elems] : null;
+    case 'int':
+      return Number.isFinite(d.lo) && Number.isFinite(d.hi) && d.cands.length === d.hi - d.lo + 1 ? d.cands.map(int) : null;
+    case 'tuple':
+      return d.parts.every((p) => completeEnum(p, limit)) ? enumDom(d, limit) : null;
+    default:
+      return null;
+  }
+}
+
+/** Candidates for a scalar root: the domain's candidates plus numbers next to `cur` (x! > 20 with x! = 21: try 22). */
+export function candidatesNear(d: Dom, cur: Value | undefined): Value[] {
+  const base = enumDom(d) ?? [];
+  if (d.k !== 'int' || !cur || cur.k !== 'int') return base;
+  const seen = new Set(d.cands);
+  const extra: Value[] = [];
+  for (const delta of [1, -1, 2, -2, d.step, -d.step, 2 * d.step, -2 * d.step, 10 * d.step]) {
+    const n = cur.v + delta;
+    if (n >= d.lo && n <= d.hi && !seen.has(n)) {
+      seen.add(n);
+      extra.push(int(n));
+    }
+  }
+  return [...extra, ...base];
+}
+
 // ── sampling ───────────────────────────────────────────────────────────────────
 
 /** Number of elements for a new set: 2–4 at the top level, 1–2 inside other values. */
@@ -204,6 +263,7 @@ function targetSize(rng: Rng, depth: number): number {
 }
 
 export function sampleDom(d: Dom, rng: Rng, depth = 0): Value {
+  spend();
   switch (d.k) {
     case 'finite':
       return rng.pick(d.elems);
@@ -348,6 +408,7 @@ class RelGen {
   }
   allPairs(): Value[] | null {
     if (!this.xs || !this.ys || this.xs.length * this.ys.length > 2000) return null;
+    spend(this.xs.length * this.ys.length);
     const out: Value[] = [];
     for (const x of this.xs) for (const y of this.ys) {
       const p = pair(x, y);
@@ -529,9 +590,38 @@ export function repairSet(d: SetDom, v: SetValue, rng: Rng, spec: SetSpec): SetV
   return mkSet(elems);
 }
 
-/** All elements a set value may contain under the filters of `spec`, or null if too many to list. */
+/**
+ * All elements a set value may contain under the filters of `spec`, or null if too many
+ * to list. Includes elements with an atom outside the example carrier of an infinite
+ * given set ("another PATIENT") if such elements pass the filters.
+ */
 export function allowedElements(d: SetDom, rng: Rng, spec: SetSpec): Value[] | null {
   const ok = okFor(spec);
-  if (d.k === 'set') return enumDom(d.base)?.filter(ok) ?? null;
-  return new RelGen(d, rng, ok, 0).allPairs();
+  if (d.k === 'set') {
+    const all = enumDom(d.base);
+    return all && [...all, ...generic(d.base, all)].filter(ok);
+  }
+  const pairs = new RelGen(d, rng, ok, 0).allPairs();
+  if (!pairs) {
+    // too many pairs (e.g. PATIENT ⇸ ℙ DRUG): known only if no x may be in the domain
+    const xs = enumDom(d.from);
+    if (!xs || !spec.domFilters.length) return null;
+    const okX = (x: Value) => spec.domFilters.every((f) => f(x));
+    return [...xs, ...generic(d.from, xs)].some(okX) ? null : [];
+  }
+  const xs = enumDom(d.from) ?? [];
+  const ys = enumDom(d.to) ?? [];
+  const gx = generic(d.from, xs);
+  const gy = generic(d.to, ys);
+  const extra = [...gx.flatMap((x) => [...ys, ...gy].map((y) => pair(x, y))), ...xs.flatMap((x) => gy.map((y) => pair(x, y)))];
+  return [...pairs, ...extra.filter(ok)];
+}
+
+/** Values of a domain outside the example carriers (one generic atom per open given set). */
+function generic(d: Dom, listed: readonly Value[]): Value[] {
+  if (d.k === 'finite') return d.open ? [{ k: 'atom', set: d.open, name: `another ${d.open}`, fresh: true }] : [];
+  if (d.k !== 'tuple' || !listed.length) return [];
+  const sample = listed[0];
+  if (sample.k !== 'tuple') return [];
+  return d.parts.flatMap((p, i) => generic(p, []).map((g) => tuple(sample.elems.map((e, j) => (j === i ? g : e)))));
 }

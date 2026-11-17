@@ -39,6 +39,12 @@ interface TemplateSchema {
 }
 interface Template {
   id?: string;
+  /**
+   * Bump it when a change makes old saves misleading (renamed types or variables, so
+   * goals and examples no longer fit). Saves of an older revision are put aside and the
+   * topic starts fresh (see store.svelte.ts). Missing = 1.
+   */
+  revision?: number;
   title: string;
   short?: string;
   icon?: string;
@@ -78,14 +84,18 @@ export interface TemplateGoals {
   ops?: Record<string, Goal[]>;
 }
 
-/** Stable order on the start page; unknown ids follow alphabetically. */
+/**
+ * Order on the start page, from the simplest system to the most complex (the own
+ * topic comes last). The ring places them anti-clockwise from its east-most slot.
+ * Unknown ids follow alphabetically.
+ */
 const ORDER = [
-  'medication',
-  'blood-transfusion',
   'bank-account',
-  'access-control',
-  'railway-interlocking',
+  'medication',
   'air-traffic-control',
+  'railway-interlocking',
+  'blood-transfusion',
+  'access-control',
 ];
 
 const files = import.meta.glob('/templates/*.json', { eager: true, import: 'default' }) as Record<
@@ -146,6 +156,12 @@ export function hasTopic(id: string): boolean {
 /** The topic's name as on its bubble (undefined for the own topic). */
 export function topicName(id: string): string | undefined {
   return TOPICS.find((t) => t.id === id)?.short;
+}
+
+/** Template revision of a topic (1 unless the template says otherwise; own topic: 1). */
+export function revisionOf(id: string): number {
+  const r = TEMPLATES.get(id)?.revision;
+  return typeof r === 'number' && r > 1 ? r : 1;
 }
 
 /** The step goals of a template topic (undefined for the own topic). */
@@ -263,6 +279,8 @@ function fromTemplate(topicId: string, t: Template): SpecDoc {
     init: t.init ? schema(t.init, 'init', 'init') : null,
     operations,
   };
+  const revision = revisionOf(topicId);
+  if (revision > 1) spec.revision = revision;
   if (t.typesPrompt) spec.typesPrompt = t.typesPrompt;
   if (t.fixedValues && Object.keys(t.fixedValues).length) spec.fixed = { ...t.fixedValues };
   const infinite = (t.givenSets ?? []).filter((g) => g.infinite).map((g) => g.name);
@@ -277,8 +295,26 @@ function defaultPools(): Record<string, string[]> {
   return Object.fromEntries(DEFAULT_GIVEN_SETS.map((g) => [g.name, [...g.values]]));
 }
 
+/** State schema name of an own topic, from its title: 'parking garage' → 'ParkingGarage'. */
+export function stateNameOf(title: string): string {
+  return pascalCase(title) || 'System';
+}
+
+/** `base` if it is not taken, else the first free one of `base2`, `base3`, … */
+export function uniqueName(base: string, taken: Iterable<string>): string {
+  const used = new Set(taken);
+  if (!used.has(base)) return base;
+  let n = 2;
+  while (used.has(`${base}${n}`)) n++;
+  return `${base}${n}`;
+}
+
 function customSpec(title: string): SpecDoc {
-  const stateName = pascalCase(title) || 'System';
+  const stateName = stateNameOf(title);
+  const initName = `Init${stateName}`;
+  // a system called "Query" keeps its name; the default operation moves aside
+  const query = uniqueName('Query', [stateName, initName]);
+  const update = uniqueName('Update', [stateName, initName, query]);
   return {
     topicId: CUSTOM_ID,
     title,
@@ -287,13 +323,13 @@ function customSpec(title: string): SpecDoc {
     pools: defaultPools(),
     infinite: DEFAULT_SETS.filter((d) => d.infinite).map((d) => d.name),
     state: { id: 'state', role: 'state', name: stateName, decls: '', preds: '' },
-    init: { id: 'init', role: 'init', name: `Init${stateName}`, decls: '', preds: '' },
+    init: { id: 'init', role: 'init', name: initName, decls: '', preds: '' },
     operations: [
       {
         id: 'op-query',
         role: 'operation',
         opKind: 'query',
-        name: 'Query',
+        name: query,
         decls: `Ξ${stateName}`,
         preds: '',
       },
@@ -301,7 +337,7 @@ function customSpec(title: string): SpecDoc {
         id: 'op-update',
         role: 'operation',
         opKind: 'update',
-        name: 'Update',
+        name: update,
         decls: `Δ${stateName}`,
         preds: '',
       },

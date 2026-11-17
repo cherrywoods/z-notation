@@ -18,9 +18,12 @@ export interface ShownVar {
    *   'computed'  — determined by the predicates (e.g. borrower′ = borrower ∪ {…})
    *   'unchanged' — equal to the before value
    *   'free'      — NOT determined: other values would satisfy all predicates too
+   *   'chosen'    — picked by the search; whether the predicates fix it is not known
+   *                 (no other value was found, but that is no proof, or no time was left)
+   * 'computed' / 'unchanged' are only claimed when established.
    * Before-state and input variables: undefined.
    */
-  status?: 'computed' | 'unchanged' | 'free';
+  status?: 'computed' | 'unchanged' | 'free' | 'chosen';
   /** For status 'free': another value that would also be allowed (printValue text). */
   alternative?: string;
   /** For status 'free': that other value itself. */
@@ -34,7 +37,8 @@ export interface PredCheck {
   /** Where the predicate is written (state invariant, this schema's predicates, …). */
   section?: SectionRef;
   index?: number;
-  origin: 'own' | 'invariant' | 'invariant′' | 'xi';
+  /** 'frame': `v′ = v` for a state variable the Δ operation does not mention. */
+  origin: 'own' | 'invariant' | 'invariant′' | 'xi' | 'frame';
   /** Printed predicate. */
   text: string;
   /** true / false, or 'undefined' when evaluation hit an undefined application. */
@@ -45,7 +49,7 @@ export interface PredCheck {
    * may be wrong: show it as "≈" instead of ✓ / ✗. Only set (to true) when it did.
    */
   bounded?: boolean;
-  /** For 'undefined': why, e.g. "borrower(Emma) is undefined: Emma ∉ dom borrower". */
+  /** For 'undefined': why, e.g. "borrower(book?) is undefined: book? = Emma ∉ dom borrower". */
   message?: string;
 }
 
@@ -86,6 +90,11 @@ export type OpExample =
       checks: PredCheck[];
       /** For 'blocked': the explicit preconditions that are false. */
       failed?: PredCheck[];
+      /**
+       * A `before` state was passed but no longer fits the spec (e.g. the invariant
+       * changed since), so this example uses a fresh before-state instead.
+       */
+      freshBefore?: boolean;
     }
   | {
       kind: 'op';
@@ -95,9 +104,12 @@ export type OpExample =
        * 'no-input'   no state + inputs satisfy the preconditions (operation never applicable)
        * 'no-after'   a valid before-state + inputs exist, but no after-state/outputs satisfy all
        *              predicates (typically: the effect breaks the invariant′)
-       * 'no-blocked' the operation is never blocked (for the blocked-case request)
+       * 'no-blocked' the operation is never blocked (for the blocked-case request); with a
+       *              given before-state: no input is blocked in that state
+       * 'no-input-for-state'  with a given before-state: no input meets the preconditions
+       *              in that state (another state might work)
        */
-      reason: 'no-before' | 'no-input' | 'no-after' | 'no-blocked';
+      reason: 'no-before' | 'no-input' | 'no-after' | 'no-blocked' | 'no-input-for-state';
       message: string;
       before?: ShownVar[];
       inputs?: ShownVar[];
@@ -115,11 +127,16 @@ export interface InferredFact {
    * 'defined'   f(x) is defined (x ∈ dom f follows from the predicates)
    * 'initial'   a value of the initial state that follows from Init + invariant
    * 'implied'   another useful consequence
+   * 'guaranteed' a precondition the invariant after imposes where the operation changes
+   *             the state (e.g. `balance(a?) - amount? ≥ -overdraft(a?)`); 'unchanged'
+   *             also covers Δ variables the operation does not mention (reason "not mentioned")
    */
-  kind: 'effect' | 'unchanged' | 'defined' | 'initial' | 'implied';
+  kind: 'effect' | 'unchanged' | 'defined' | 'initial' | 'implied' | 'guaranteed';
   /** The fact in Z, e.g. "onLoan′ = onLoan ∪ {book?}". */
   text: string;
   derivation: Derivation;
+  /** A short plain-words reading, e.g. "every patient is in patients" (for 'implied' facts). */
+  note?: string;
 }
 
 export interface InferenceResult {

@@ -24,7 +24,11 @@
     { "id": "R7", "text": "An administrator can assign a role to a registered user." }
   ],
   "givenSets": [
-    { "name": "USER", "values": ["alice", "bob", "carol", "dave", "erin", "frank", "grace", "heidi"], "infinite": true },
+    {
+      "name": "USER",
+      "values": ["alice", "bob", "carol", "dave", "erin", "frank", "grace", "heidi"],
+      "infinite": true
+    },
     { "name": "ROLE", "values": ["clerk", "approver", "auditor", "admin", "developer", "operator"] },
     {
       "name": "PERMISSION",
@@ -52,7 +56,9 @@
       { "text": "Only registered users hold roles", "check": { "holds": "dom holds ⊆ users" } },
       {
         "text": "Nobody holds two conflicting roles",
-        "check": { "holds": "∀ u : USER; r₁, r₂ : ROLE • (u ↦ r₁) ∈ holds ∧ (u ↦ r₂) ∈ holds ⇒ (r₁ ↦ r₂) ∉ conflicts" }
+        "check": {
+          "holds": "∀ u ∈ USER; r₁, r₂ ∈ ROLE . r₁ ≠ r₂ ∧ (u ↦ r₁) ∈ holds ∧ (u ↦ r₂) ∈ holds ⇒ (r₁ ↦ r₂) ∉ conflicts"
+        }
       }
     ],
     "init": [
@@ -65,7 +71,7 @@
         { "text": "Only for registered users", "check": { "holds": "user? ∈ users" } },
         {
           "text": "Output every permission one of the user's roles grants",
-          "check": { "holds": "perms! = { p ∈ PERMISSION | ∃ r : ROLE • (user? ↦ r) ∈ holds ∧ (r ↦ p) ∈ grants }" }
+          "check": { "holds": "perms! = { p ∈ PERMISSION | ∃ r ∈ ROLE . (user? ↦ r) ∈ holds ∧ (r ↦ p) ∈ grants }" }
         },
         {
           "text": "Don't change anything",
@@ -77,7 +83,7 @@
         { "text": "Only for registered users", "check": { "holds": "user? ∈ users" } },
         {
           "text": "Never a role that conflicts with one the user holds",
-          "check": { "holds": "∀ r : ROLE • (user? ↦ r) ∈ holds ⇒ (r ↦ role?) ∉ conflicts" }
+          "check": { "holds": "∀ r ∈ ROLE . (user? ↦ r) ∈ holds ⇒ (r ↦ role?) ∉ conflicts" }
         },
         { "text": "Give the user the role", "check": { "holds": "holds′ = holds ∪ {user? ↦ role?}" } },
         {
@@ -99,10 +105,10 @@
     ],
     "predicates": [
       { "text": "dom holds ⊆ users", "requirements": ["R1"] },
-      { "text": "∀ r : ROLE • (r ↦ r) ∉ conflicts", "requirements": ["R3"] },
-      { "text": "∀ r₁, r₂ : ROLE • (r₁ ↦ r₂) ∈ conflicts ⇒ (r₂ ↦ r₁) ∈ conflicts", "requirements": ["R3"] },
+      { "text": "∀ r ∈ ROLE . (r ↦ r) ∉ conflicts", "requirements": ["R3"] },
+      { "text": "∀ r₁, r₂ ∈ ROLE . (r₁ ↦ r₂) ∈ conflicts ⇒ (r₂ ↦ r₁) ∈ conflicts", "requirements": ["R3"] },
       {
-        "text": "∀ u : USER; r₁, r₂ : ROLE • (u ↦ r₁) ∈ holds ∧ (u ↦ r₂) ∈ holds ⇒ (r₁ ↦ r₂) ∉ conflicts",
+        "text": "∀ u ∈ USER; r₁, r₂ ∈ ROLE . (u ↦ r₁) ∈ holds ∧ (u ↦ r₂) ∈ holds ⇒ (r₁ ↦ r₂) ∉ conflicts",
         "requirements": ["R4"],
         "hidden": true
       }
@@ -111,12 +117,8 @@
   "init": {
     "name": "InitAccessControl",
     "prompt": "At the start, there are no users.",
-    "declarations": [
-      { "text": "AccessControl", "requirements": [] }
-    ],
-    "predicates": [
-      { "text": "users = ∅", "requirements": ["R5"] }
-    ]
+    "declarations": [{ "text": "AccessControl", "requirements": [] }],
+    "predicates": [{ "text": "users = ∅", "requirements": ["R5"] }]
   },
   "operations": [
     {
@@ -131,7 +133,7 @@
       "predicates": [
         { "text": "user? ∈ users", "requirements": ["R6"] },
         {
-          "text": "perms! = { p ∈ PERMISSION | ∃ r : ROLE • (user? ↦ r) ∈ holds ∧ (r ↦ p) ∈ grants }",
+          "text": "perms! = { p ∈ PERMISSION | ∃ r ∈ ROLE . (user? ↦ r) ∈ holds ∧ (r ↦ p) ∈ grants }",
           "requirements": ["R6"],
           "hidden": true
         }
@@ -148,7 +150,11 @@
       ],
       "predicates": [
         { "text": "user? ∈ users", "requirements": ["R1"] },
-        { "text": "∀ r : ROLE • (user? ↦ r) ∈ holds ⇒ (r ↦ role?) ∉ conflicts", "requirements": ["R4"], "hidden": true },
+        {
+          "text": "∀ r ∈ ROLE . (user? ↦ r) ∈ holds ⇒ (r ↦ role?) ∉ conflicts",
+          "requirements": ["R4"],
+          "hidden": true
+        },
         { "text": "holds′ = holds ∪ {user? ↦ role?}", "requirements": ["R7"], "hidden": true },
         { "text": "users′ = users", "requirements": [] },
         { "text": "grants′ = grants", "requirements": [] },

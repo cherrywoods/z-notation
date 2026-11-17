@@ -2,7 +2,7 @@
 // ASCII shortcuts (so pasted ASCII text still parses), and always reports the
 // canonical unicode value of a token.
 
-import { ASCII_GLYPH_SHORTCUTS, SYMBOL_BY_TEXT, type SymbolCategory } from './symbols';
+import { ASCII_GLYPH_SHORTCUTS, OUT_OF_SCOPE_ASCII, SYMBOL_BY_TEXT, type SymbolCategory } from './symbols';
 
 export type TokenKind = 'ident' | 'number' | 'sym' | 'keyword' | 'newline' | 'error' | 'eof';
 export type Decoration = '' | '′' | '?' | '!';
@@ -12,6 +12,8 @@ export interface Token {
   /**
    * Canonical value. sym/keyword: unicode text ('⇸', 'dom', '∈').
    * ident: full decorated name ('borrower′', 'book?'). number: the digits ('42', '0.25').
+   * error: the unknown character (a whole code point, with its combining marks), or
+   * the unicode arrow an out-of-scope ASCII spelling stands for ('>->' → '↣').
    */
   value: string;
   /** Source offsets (half-open). */
@@ -30,52 +32,81 @@ export interface Token {
 /** Characters that look like letters but are Z symbols. */
 // (ℝ is not part of the tutorial, but must not become part of a name either.)
 const NOT_IDENT = new Set(['ℙ', 'ℕ', 'ℤ', 'ℝ', 'Δ', 'Ξ']);
-const IDENT_START = /[\p{L}_]/u;
-const IDENT_CONT = /[\p{L}\p{N}_]/u;
+const IDENT_START = /^[\p{L}_]$/u;
+const IDENT_CONT = /^[\p{L}\p{N}_]$/u;
+/** Mathematical Alphanumeric Symbols (𝒜, 𝔽, 𝐱, …): symbols, not letters of a name. */
+const isMathAlnum = (ch: string) => {
+  const c = ch.codePointAt(0) ?? 0;
+  return c >= 0x1d400 && c <= 0x1d7ff;
+};
 
+/** `ch` is one code point. */
 export function isIdentStart(ch: string): boolean {
-  return IDENT_START.test(ch) && !NOT_IDENT.has(ch);
+  return IDENT_START.test(ch) && !NOT_IDENT.has(ch) && !isMathAlnum(ch);
 }
 export function isIdentChar(ch: string): boolean {
-  return IDENT_CONT.test(ch) && !NOT_IDENT.has(ch);
+  return IDENT_CONT.test(ch) && !NOT_IDENT.has(ch) && !isMathAlnum(ch);
+}
+
+/** The code point at `i` (one or two UTF-16 units). */
+function codePointAt(src: string, i: number): string {
+  const c = src.codePointAt(i);
+  return c === undefined ? '' : String.fromCodePoint(c);
+}
+
+/** One user-perceived character at `i` (a code point with its combining marks, an emoji sequence, …). */
+let graphemes: Intl.Segmenter | null = null;
+function graphemeAt(src: string, i: number): string {
+  graphemes ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  const first = graphemes.segment(src.slice(i, i + 32))[Symbol.iterator]().next();
+  return first.done ? codePointAt(src, i) : first.value.segment;
 }
 
 /** Word tokens with special meaning. Words map to their canonical symbol text. */
-const WORDS: Record<string, string> = {
-  dom: 'dom',
-  ran: 'ran',
-  div: 'div',
-  mod: 'mod',
+const WORDS = new Map<string, string>([
+  ['dom', 'dom'],
+  ['ran', 'ran'],
+  ['div', 'div'],
+  ['mod', 'mod'],
   // ASCII word shortcuts (normally replaced while typing, but accepted as-is)
-  in: '∈',
-  notin: '∉',
-  union: '∪',
-  inter: '∩',
-  forall: '∀',
-  exists: '∃',
-  not: '¬',
-};
+  ['in', '∈'],
+  ['notin', '∉'],
+  ['union', '∪'],
+  ['inter', '∩'],
+  ['forall', '∀'],
+  ['exists', '∃'],
+  ['not', '¬'],
+]);
 
 /** Punctuation and operator symbols without an entry in SYMBOLS. */
 const PLAIN_SYMBOLS = new Set(['(', ')', '[', ']', '{', '}', ',', ';', '|', '+', '-', '*', '..']);
 
 /** Unicode look-alikes normalised to a canonical form. */
-const ALIASES: Record<string, string> = {
-  '⦁': '•', // Z NOTATION SPOT
-  '−': '-', // MINUS SIGN
-  '∗': '*',
-  '∖': '∖',
-};
+const ALIASES = new Map<string, string>([
+  ['•', '.'], // the Z spot (the tutorial writes a period)
+  ['⦁', '.'], // Z NOTATION SPOT
+  ['−', '-'], // MINUS SIGN
+  ['∗', '*'],
+  ['∖', '∖'],
+  // long arrows, e.g. from LaTeX's \implies, \iff and \longmapsto
+  ['⟹', '⇒'],
+  ['⟺', '⇔'],
+  ['⟼', '↦'],
+]);
 
-/** Multi-character sequences, longest first: [source text, canonical value]. */
-const MULTI: [string, string][] = (
-  [...ASCII_GLYPH_SHORTCUTS.filter(([a]) => a.length > 1), ['ℕ₁', 'ℕ₁'], ['..', '..']] as [string, string][]
-).sort((a, b) => b[0].length - a[0].length);
+/**
+ * Multi-character sequences, longest first: [source text, canonical value, kind].
+ * Out-of-scope ASCII arrows (`>->`) become error tokens carrying their unicode arrow.
+ */
+const MULTI: [string, string, 'sym' | 'error'][] = [
+  ...ASCII_GLYPH_SHORTCUTS.filter(([a]) => a.length > 1).map(([a, u]) => [a, u, 'sym'] as [string, string, 'sym']),
+  ['ℕ₁', 'ℕ₁', 'sym'] as [string, string, 'sym'],
+  ['..', '..', 'sym'] as [string, string, 'sym'],
+  ...OUT_OF_SCOPE_ASCII.map(([a, u]) => [a, u, 'error'] as [string, string, 'error']),
+].sort((a, b) => b[0].length - a[0].length);
 
-/** Single ASCII characters that are shortcuts for unicode symbols ('\\' → '∖', '@' → '•', '~' → '¬'). */
-const SINGLE_ASCII: Record<string, string> = Object.fromEntries(
-  ASCII_GLYPH_SHORTCUTS.filter(([a]) => a.length === 1 && a !== "'").map(([a, u]) => [a, u]),
-);
+/** Single ASCII characters that are shortcuts for unicode symbols ('\\' → '∖', '@' → '.', '~' → '¬'). */
+const SINGLE_ASCII = new Map<string, string>(ASCII_GLYPH_SHORTCUTS.filter(([a]) => a.length === 1 && a !== "'"));
 
 export function symbolIdOf(value: string): string | undefined {
   return SYMBOL_BY_TEXT[value]?.id;
@@ -89,7 +120,7 @@ export function lex(src: string): Token[] {
   const push = (t: Token) => tokens.push(t);
 
   while (i < n) {
-    const ch = src[i];
+    const ch = codePointAt(src, i);
 
     // whitespace
     if (ch === '\n') {
@@ -104,11 +135,11 @@ export function lex(src: string): Token[] {
 
     // identifiers & words
     if (isIdentStart(ch)) {
-      let j = i + 1;
-      while (j < n && isIdentChar(src[j])) j++;
+      let j = i + ch.length;
+      for (let c = codePointAt(src, j); j < n && isIdentChar(c); c = codePointAt(src, j)) j += c.length;
       const base = src.slice(i, j);
-      if (Object.prototype.hasOwnProperty.call(WORDS, base)) {
-        const value = WORDS[base];
+      const value = WORDS.get(base);
+      if (value !== undefined) {
         push({ kind: 'keyword', value, from: i, to: j, symbolId: symbolIdOf(value) });
         i = j;
         continue;
@@ -145,10 +176,10 @@ export function lex(src: string): Token[] {
 
     // multi-character symbols (ASCII shortcuts, ℕ₁, ..)
     let matched = false;
-    for (const [seq, value] of MULTI) {
+    for (const [seq, value, kind] of MULTI) {
       if (src.startsWith(seq, i)) {
-        // '{}' is only the empty set if not followed by something odd; always fine here.
-        push({ kind: 'sym', value, from: i, to: i + seq.length, symbolId: symbolIdOf(value) });
+        if (kind === 'error') push({ kind, value, from: i, to: i + seq.length });
+        else push({ kind, value, from: i, to: i + seq.length, symbolId: symbolIdOf(value) });
         i += seq.length;
         matched = true;
         break;
@@ -157,16 +188,18 @@ export function lex(src: string): Token[] {
     if (matched) continue;
 
     // single characters
-    let value = ALIASES[ch] ?? SINGLE_ASCII[ch] ?? ch;
+    let value = ALIASES.get(ch) ?? SINGLE_ASCII.get(ch) ?? ch;
     if (ch === "'" || ch === '′') value = '′';
     if (SYMBOL_BY_TEXT[value] || PLAIN_SYMBOLS.has(value) || value === '′') {
-      push({ kind: 'sym', value, from: i, to: i + 1, symbolId: symbolIdOf(value) });
-      i++;
+      push({ kind: 'sym', value, from: i, to: i + ch.length, symbolId: symbolIdOf(value) });
+      i += ch.length;
       continue;
     }
 
-    push({ kind: 'error', value: ch, from: i, to: i + 1 });
-    i++;
+    // anything else: one error token per character (never half of a surrogate pair)
+    const bad = graphemeAt(src, i);
+    push({ kind: 'error', value: bad, from: i, to: i + bad.length });
+    i += bad.length;
   }
 
   push({ kind: 'eof', value: '', from: n, to: n });

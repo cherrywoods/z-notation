@@ -12,10 +12,10 @@
 import type { Term } from '../ast';
 import { freeVars, printTerm } from '../print';
 import { rewriteOnce, type LawEnv } from './rewrite';
-import { isEmptySet, key, pairParts, replaceSub, view } from './terms';
+import { isEmptySet, key, mk, pairParts, replaceSub, view } from './terms';
 
 /** Where a premise comes from (used to word messages; not part of the output). */
-export type PremiseSource = 'own' | 'inv' | 'decl' | 'xi' | 'law';
+export type PremiseSource = 'own' | 'inv' | 'decl' | 'xi' | 'frame' | 'law';
 
 export interface Premise {
   text: string;
@@ -52,6 +52,13 @@ export const premiseOf = (a: Atom): Premise => ({ text: printTerm(a.term), reaso
 export const declPremise = (name: string, declared: Term): Premise => ({
   text: `${name} : ${printTerm(declared)}`,
   reason: 'declaration',
+  src: 'decl',
+});
+
+/** `dom f = X` for a total function f : X → Y. */
+export const totalPremise = (f: string, X: Term): Premise => ({
+  text: `dom ${f} = ${printTerm(X)}`,
+  reason: `${f} is total (→)`,
   src: 'decl',
 });
 
@@ -115,6 +122,13 @@ export class Prover {
     return this.env.decls.get(name);
   }
 
+  /** `x ∈ X` for a whole given set X: by the declaration of x, or by its type. */
+  private typing(x: Term, X: Term): Premise {
+    const dt = x.kind === 'name' ? this.decl(x.name) : undefined;
+    const byDecl = x.kind === 'name' && dt && key(dt) === key(X);
+    return { text: printTerm(mk.rel('∈', x, X)), reason: byDecl ? `declaration of ${printTerm(x)}` : 'by its type', src: 'decl' };
+  }
+
   /** Is T a whole given set (or ℤ), so that every well-typed element belongs to it? */
   private isCarrier(T: Term): boolean {
     return (T.kind === 'name' && this.env.givenSets.has(T.name)) || (T.kind === 'builtinSet' && T.set === 'ℤ');
@@ -153,7 +167,7 @@ export class Prover {
 
     for (const a of this.mems) if (a.ka === kx && a.kb === kT) return [a.p];
     if (T.kind === 'setDisplay' && T.elems.some((e) => key(e) === kx)) return [];
-    if (this.isCarrier(T)) return []; // true by typing
+    if (this.isCarrier(T)) return [this.typing(x, T)]; // true by typing
     if (x.kind === 'name') {
       const dt = this.decl(x.name);
       if (dt && key(dt) === kT) return [declPremise(x.name, dt)];
@@ -192,7 +206,7 @@ export class Prover {
         const dt = this.decl(R.name);
         if (dt && dt.kind === 'binop' && dt.op === '→') {
           const rest = this.m(x, kx, dt.left, d, path);
-          if (rest) return [declPremise(R.name, dt), ...rest];
+          if (rest) return [totalPremise(R.name, dt.left), ...rest];
         }
       }
     }
@@ -241,6 +255,11 @@ export class Prover {
         const r = l && this.n(x, kx, { ...T, arg: R.right }, d, path);
         return l && r ? [...l, ...r] : null;
       }
+      // dom (R ∖ S) ⊆ dom R, dom (R ∩ S) ⊆ dom R and dom S (and so for ran)
+      if (R.kind === 'binop' && (R.op === '∖' || R.op === '∩')) {
+        const r = this.n(x, kx, { ...T, arg: R.left }, d, path) ?? (R.op === '∩' ? this.n(x, kx, { ...T, arg: R.right }, d, path) : null);
+        if (r) return r;
+      }
     }
     const law = this.lawStep(T);
     if (law) {
@@ -276,7 +295,7 @@ export class Prover {
     for (const e of this.eqs) if ((e.ka === kA && e.kb === kB) || (e.ka === kB && e.kb === kA)) return [e.p];
     const dp = this.declSub(A, kB);
     if (dp) return [dp];
-    if (this.isCarrier(B)) return [];
+    if (this.isCarrier(B)) return [{ text: `${printTerm(A)} ⊆ ${printTerm(B)}`, reason: 'by its type', src: 'decl' }];
 
     if (A.kind === 'binop') {
       if (A.op === '∪') {
@@ -308,6 +327,19 @@ export class Prover {
       const l = this.s({ ...A, arg: A.arg.left }, B, d, path);
       const r = l && this.s({ ...A, arg: A.arg.right }, B, d, path);
       return l && r ? [...l, ...r] : null;
+    }
+    if (A.kind === 'unop' && (A.op === 'dom' || A.op === 'ran') && A.arg.kind === 'binop' && (A.arg.op === '∖' || A.arg.op === '∩')) {
+      const R = A.arg;
+      const r = this.s({ ...A, arg: R.left }, B, d, path) ?? (R.op === '∩' ? this.s({ ...A, arg: R.right }, B, d, path) : null);
+      if (r) return r;
+    }
+    // A ⊆ X = dom f for a total function f : X → Y
+    if (B.kind === 'unop' && B.op === 'dom' && B.arg.kind === 'name') {
+      const dt = this.decl(B.arg.name);
+      if (dt && dt.kind === 'binop' && dt.op === '→') {
+        const r = this.s(A, dt.left, d, path);
+        if (r) return [...r, totalPremise(B.arg.name, dt.left)];
+      }
     }
     if (d <= 0) return null;
     for (const [A2, p] of this.rewrites(A)) {

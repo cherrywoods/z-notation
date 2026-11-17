@@ -43,12 +43,23 @@
       { "text": "A type for runways", "check": { "given": "RUNWAY" } }
     ],
     "state": [
-      { "text": "Which aircraft are approaching", "check": { "var": "approaching" } },
-      { "text": "Which runways are occupied", "check": { "var": "occupied" } },
-      { "text": "Which runway each aircraft is cleared to land on", "check": { "var": "cleared" } },
       {
-        "text": "Only approaching aircraft are cleared, at most one per runway",
-        "check": { "holds": "dom cleared ⊆ approaching ∧ (∀ a₁, a₂ : dom cleared • cleared(a₁) = cleared(a₂) ⇒ a₁ = a₂)" }
+        "text": "Which aircraft are approaching and which runways are occupied",
+        "check": { "var": ["approaching", "occupied"] }
+      },
+      { "text": "Which runway each aircraft is cleared to land on", "check": { "var": "cleared" } },
+      { "text": "Only approaching aircraft are cleared", "check": { "holds": "dom cleared ⊆ approaching" } },
+      {
+        "text": "At most one aircraft per runway",
+        "check": {
+          "holds": "∀ a₁, a₂ ∈ dom cleared; r ∈ ran cleared . (a₁ ↦ r) ∈ cleared ∧ (a₂ ↦ r) ∈ cleared ⇒ a₁ = a₂"
+        }
+      },
+      {
+        "text": "An aircraft is cleared for at most one runway",
+        "check": {
+          "holds": "∀ a ∈ dom cleared; r₁, r₂ ∈ ran cleared . (a ↦ r₁) ∈ cleared ∧ (a ↦ r₂) ∈ cleared ⇒ r₁ = r₂"
+        }
       },
       { "text": "No clearance for an occupied runway", "check": { "holds": "ran cleared ∩ occupied = ∅" } }
     ],
@@ -73,7 +84,10 @@
           "text": "Only onto a free runway no other aircraft is cleared for",
           "check": { "holds": "r? ∉ occupied ∧ r? ∉ ran (cleared ∖ {a? ↦ r?})" }
         },
-        { "text": "Record the landing clearance", "check": { "holds": "cleared′ = cleared ∪ {a? ↦ r?}" } },
+        {
+          "text": "Record the landing clearance",
+          "check": { "holds": "cleared′ = cleared ∪ {a? ↦ r?} ∨ cleared′ = (cleared ∖ {a? ↦ cleared(a?)}) ∪ {a? ↦ r?}" }
+        },
         {
           "text": "Leave approaching aircraft and runways unchanged",
           "check": { "holds": "approaching′ = approaching ∧ occupied′ = occupied" }
@@ -92,19 +106,15 @@
     ],
     "predicates": [
       { "text": "dom cleared ⊆ approaching", "requirements": ["R1"] },
-      { "text": "∀ a₁, a₂ : dom cleared • cleared(a₁) = cleared(a₂) ⇒ a₁ = a₂", "requirements": ["R3"] },
+      { "text": "∀ a₁, a₂ ∈ dom cleared . cleared(a₁) = cleared(a₂) ⇒ a₁ = a₂", "requirements": ["R3"] },
       { "text": "ran cleared ∩ occupied = ∅", "requirements": ["R4"], "hidden": true }
     ]
   },
   "init": {
     "name": "InitTower",
     "prompt": "At the start, no aircraft are approaching.",
-    "declarations": [
-      { "text": "Tower", "requirements": [] }
-    ],
-    "predicates": [
-      { "text": "approaching = ∅", "requirements": ["R5"] }
-    ]
+    "declarations": [{ "text": "Tower", "requirements": [] }],
+    "predicates": [{ "text": "approaching = ∅", "requirements": ["R5"] }]
   },
   "operations": [
     {

@@ -10,7 +10,7 @@ export type SymbolCategory =
   | 'type' // ℙ ℕ ℤ ×, given-set names
   | 'relation' // ↔ ⇸ → ↦ dom ran
   | 'set' // ∈ ∉ ⊆ ⊂ ∪ ∩ ∖ ∅ # { | }
-  | 'logic' // ∧ ∨ ¬ ⇒ ⇔ ∀ ∃ • = ≠ < ≤ > ≥ + − ∗
+  | 'logic' // ∧ ∨ ¬ ⇒ ⇔ ∀ ∃ . = ≠ < ≤ > ≥ + − ∗
   | 'schema' // Δ Ξ and the declaration colon
   | 'decoration'; // ′ ? !
 
@@ -80,9 +80,10 @@ export const SYMBOLS: ZSymbol[] = [
   { id: 'not', text: '¬', name: 'not', category: 'logic', ascii: ['~', 'not'], snippet: '¬ ', library: 'main' },
   { id: 'implies', text: '⇒', name: 'implies', category: 'logic', ascii: ['=>'], snippet: '${P} ⇒ ${Q}', library: 'main' },
   { id: 'iff', text: '⇔', name: 'if and only if', category: 'logic', ascii: ['<=>'], snippet: '${P} ⇔ ${Q}', library: 'more' },
-  { id: 'forall', text: '∀', name: 'for all', category: 'logic', ascii: ['forall'], snippet: '∀ ${x} : ${S} • ${P}', library: 'main' },
-  { id: 'exists', text: '∃', name: 'there exists', category: 'logic', ascii: ['exists'], snippet: '∃ ${x} : ${S} • ${P}', library: 'main' },
-  { id: 'spot', text: '•', name: 'such that (spot)', category: 'logic', ascii: ['@'] },
+  { id: 'forall', text: '∀', name: 'for all', category: 'logic', ascii: ['forall'], snippet: '∀ ${x} ∈ ${S} . ${P}', library: 'main' },
+  { id: 'exists', text: '∃', name: 'there exists', category: 'logic', ascii: ['exists'], snippet: '∃ ${x} ∈ ${S} . ${P}', library: 'main' },
+  // the spot of ∀ x ∈ S . P and { x ∈ S | P . e }; • (and @) are accepted as aliases
+  { id: 'spot', text: '.', name: 'such that', category: 'logic', ascii: ['@'] },
   { id: 'eq', text: '=', name: 'equals', category: 'logic' },
   { id: 'neq', text: '≠', name: 'not equal', category: 'logic', ascii: ['/='], snippet: '≠', library: 'more' },
   { id: 'lt', text: '<', name: 'less than', category: 'logic' },
@@ -91,11 +92,16 @@ export const SYMBOLS: ZSymbol[] = [
   { id: 'geq', text: '≥', name: 'greater or equal', category: 'logic', ascii: ['>='], snippet: '≥', library: 'more' },
 ];
 
-export const SYMBOL_BY_ID: Record<string, ZSymbol> = Object.fromEntries(SYMBOLS.map((s) => [s.id, s]));
+/** A lookup table without Object.prototype, so that keys like 'toString' find nothing. */
+function table<T>(entries: Iterable<readonly [string, T]>): Record<string, T> {
+  return Object.assign(Object.create(null) as Record<string, T>, Object.fromEntries(entries));
+}
+
+export const SYMBOL_BY_ID: Record<string, ZSymbol> = table(SYMBOLS.map((s) => [s.id, s] as const));
 
 /** Look up a symbol by its canonical text (e.g. '⇸' → pfun). */
-export const SYMBOL_BY_TEXT: Record<string, ZSymbol> = Object.fromEntries(
-  SYMBOLS.filter((s) => !['apply', 'setdisplay', 'setcomp'].includes(s.id)).map((s) => [s.text, s]),
+export const SYMBOL_BY_TEXT: Record<string, ZSymbol> = table(
+  SYMBOLS.filter((s) => !['apply', 'setdisplay', 'setcomp'].includes(s.id)).map((s) => [s.text, s] as const),
 );
 
 /** Glyph-like (non-word) ASCII shortcuts, longest first: [ascii, unicode]. */
@@ -107,3 +113,21 @@ export const ASCII_GLYPH_SHORTCUTS: [string, string][] = SYMBOLS.flatMap((s) =>
 export const ASCII_WORD_SHORTCUTS: [string, string][] = SYMBOLS.flatMap((s) =>
   (s.ascii ?? []).filter((a) => /^[A-Za-z]/.test(a)).map((a) => [a, s.text] as [string, string]),
 );
+
+/**
+ * ASCII spellings of symbols that are not part of the tutorial (arrows, relational
+ * image), longest first: [ascii, unicode]. The lexer reads them as the unicode symbol
+ * (so the parser can say that it is not part of the tutorial), and pasting turns them
+ * into it.
+ */
+export const OUT_OF_SCOPE_ASCII: [string, string][] = [
+  ['>->>', '⤖'],
+  ['+->>', '⤀'],
+  ['-->>', '↠'],
+  ['>-|>', '⤔'],
+  ['>->', '↣'],
+  ['>+>', '⤔'],
+  ['->>', '↠'],
+  ['(|', '⦇'],
+  ['|)', '⦈'],
+];

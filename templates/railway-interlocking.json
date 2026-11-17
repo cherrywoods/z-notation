@@ -38,15 +38,29 @@
     ],
     "state": [
       { "text": "Which block each train is in", "check": { "var": "at" } },
-      { "text": "Which block each signal leads into", "check": { "var": "protects" } },
-      { "text": "Which signals show green", "check": { "var": "green" } },
+      {
+        "text": "Which block each signal leads into, and which signals are green",
+        "check": { "var": ["protects", "green"] }
+      },
+      {
+        "text": "A train is in at most one block",
+        "check": { "holds": "∀ t ∈ dom at; b₁, b₂ ∈ ran at . (t ↦ b₁) ∈ at ∧ (t ↦ b₂) ∈ at ⇒ b₁ = b₂" }
+      },
       {
         "text": "Never two trains in the same block",
-        "check": { "holds": "∀ t₁, t₂ : dom at • at(t₁) = at(t₂) ⇒ t₁ = t₂" }
+        "check": { "holds": "∀ t₁, t₂ ∈ dom at; b ∈ ran at . (t₁ ↦ b) ∈ at ∧ (t₂ ↦ b) ∈ at ⇒ t₁ = t₂" }
+      },
+      {
+        "text": "Each signal leads into exactly one block",
+        "check": {
+          "holds": "dom protects = SIGNAL ∧ (∀ s ∈ SIGNAL; b₁, b₂ ∈ ran protects . (s ↦ b₁) ∈ protects ∧ (s ↦ b₂) ∈ protects ⇒ b₁ = b₂)"
+        }
       },
       {
         "text": "Green only into a free block, never two greens into one block",
-        "check": { "holds": "(∀ s : green • protects(s) ∉ ran at) ∧ (∀ s₁, s₂ : green • protects(s₁) = protects(s₂) ⇒ s₁ = s₂)" }
+        "check": {
+          "holds": "(∀ s ∈ green; b ∈ ran protects . (s ↦ b) ∈ protects ⇒ b ∉ ran at) ∧ (∀ s₁, s₂ ∈ green; b ∈ ran protects . (s₁ ↦ b) ∈ protects ∧ (s₂ ↦ b) ∈ protects ⇒ s₁ = s₂)"
+        }
       }
     ],
     "init": [
@@ -62,10 +76,13 @@
       ],
       "ClearSignal": [
         { "text": "Take a signal as input", "check": { "var": "s?" } },
-        { "text": "Only if the block ahead is free", "check": { "holds": "protects(s?) ∉ ran at" } },
+        {
+          "text": "Only if the block ahead is free",
+          "check": { "holds": "∀ b ∈ ran protects . (s? ↦ b) ∈ protects ⇒ b ∉ ran at" }
+        },
         {
           "text": "Only if no other green signal leads into that block",
-          "check": { "holds": "∀ g : green • g ≠ s? ⇒ protects(g) ≠ protects(s?)" }
+          "check": { "holds": "∀ g ∈ green; b ∈ ran protects . g ≠ s? ∧ (s? ↦ b) ∈ protects ⇒ (g ↦ b) ∉ protects" }
         },
         { "text": "Turn the signal green", "check": { "holds": "green′ = green ∪ {s?}" } },
         { "text": "Leave the trains and the layout unchanged", "check": { "holds": "at′ = at ∧ protects′ = protects" } }
@@ -82,9 +99,9 @@
       { "text": "green : ℙ SIGNAL", "requirements": ["R2"] }
     ],
     "predicates": [
-      { "text": "∀ t₁, t₂ : dom at • at(t₁) = at(t₂) ⇒ t₁ = t₂", "requirements": ["R1"] },
-      { "text": "∀ s : green • protects(s) ∉ ran at", "requirements": ["R3"], "hidden": true },
-      { "text": "∀ s₁, s₂ : green • protects(s₁) = protects(s₂) ⇒ s₁ = s₂", "requirements": ["R4"] }
+      { "text": "∀ t₁, t₂ ∈ dom at . at(t₁) = at(t₂) ⇒ t₁ = t₂", "requirements": ["R1"] },
+      { "text": "∀ s ∈ green . protects(s) ∉ ran at", "requirements": ["R3"], "hidden": true },
+      { "text": "∀ s₁, s₂ ∈ green . protects(s₁) = protects(s₂) ⇒ s₁ = s₂", "requirements": ["R4"] }
     ]
   },
   "init": {
@@ -123,7 +140,7 @@
       ],
       "predicates": [
         { "text": "protects(s?) ∉ ran at", "requirements": ["R3"], "hidden": true },
-        { "text": "∀ g : green • protects(g) ≠ protects(s?)", "requirements": ["R4"] },
+        { "text": "∀ g ∈ green . protects(g) ≠ protects(s?)", "requirements": ["R4"] },
         { "text": "green′ = green ∪ {s?}", "requirements": ["R7"], "hidden": true },
         { "text": "at′ = at", "requirements": [] },
         { "text": "protects′ = protects", "requirements": [] }
@@ -171,7 +188,7 @@
       "predicates": [
         { "text": "t? ∉ dom at", "requirements": [] },
         { "text": "b? ∉ ran at", "requirements": ["R1"] },
-        { "text": "∀ s : green • protects(s) ≠ b?", "requirements": ["R3"] },
+        { "text": "∀ s ∈ green . protects(s) ≠ b?", "requirements": ["R3"] },
         { "text": "at′ = at ∪ {t? ↦ b?}", "requirements": [] },
         { "text": "green′ = green", "requirements": [] },
         { "text": "protects′ = protects", "requirements": [] }

@@ -6,9 +6,8 @@
 // The evaluation order of the engine (left-to-right short-circuit) is respected, so
 // that "0" never hides an undefined sub-term that `evalPred` would run into.
 
-import type { Term, VarDecl } from '../ast';
-import { EvalError, bindingValues, equalValues, evalPred, evalPredChecked, evalTerm, memberOf, type Universe } from '../eval';
-import { freeVars } from '../print';
+import type { Term } from '../ast';
+import { EvalError, equalValues, evalPred, evalPredChecked, evalTerm, failingBindings, memberOf, type Universe } from '../eval';
 import { isSetLike, valueKey, type Value } from '../values';
 
 type Env = Map<string, Value>;
@@ -51,13 +50,19 @@ export function hasBinder(t: Term): boolean {
  * Truth of a predicate as the evaluator defines it, with the reason when it is not
  * true, and `bounded` when the verdict relied on cutting off an infinite set.
  */
-export function truth(t: Term, env: Env, u: Universe): { result: boolean | 'undefined'; message?: string; bounded?: true } {
+export function truth(
+  t: Term,
+  env: Env,
+  u: Universe,
+): { result: boolean | 'undefined'; message?: string; general?: string; bounded?: true } {
   try {
     const r = evalPredChecked(t, env, u);
     return r.bounded ? { result: r.value, bounded: true } : { result: r.value };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    return { result: e instanceof EvalError && e.reason === 'undefined' ? 'undefined' : false, message };
+    if (!(e instanceof EvalError) || e.reason !== 'undefined') return { result: false, message };
+    const general = e.general;
+    return general ? { result: 'undefined', message, general } : { result: 'undefined', message };
   }
 }
 
@@ -153,100 +158,28 @@ function rel(t: Extract<Term, { kind: 'rel' }>, env: Env, u: Universe): number {
 
 const numDist = (gap: number) => 1 + Math.min(gap, 1000) / 1000;
 
-// ── ∀ with pruning ─────────────────────────────────────────────────────────────
+// ── ∀ ──────────────────────────────────────────────────────────────────────────
 
-interface QuantInfo {
-  names: { name: string; type: Term }[];
-  /** Conjuncts of the `| P` part and the antecedent of a body `A ⇒ B`, in evaluation order. */
-  guards: { term: Term; need: number }[];
-}
-const quantCache = new WeakMap<Quant, QuantInfo>();
-
-const conj = (t: Term): Term[] => (t.kind === 'logic' && t.op === '∧' ? [...conj(t.left), ...conj(t.right)] : [t]);
-
-function quantInfo(t: Quant): QuantInfo {
-  let qi = quantCache.get(t);
-  if (qi) return qi;
-  let names = t.decls.flatMap((dcl: VarDecl) => dcl.names.map((n) => ({ name: n.name, type: dcl.type })));
-  // guards in evaluation order: the `| P` part, then (once it holds) the body's antecedent
-  const terms = [...(t.pred ? conj(t.pred) : []), ...(t.body.kind === 'logic' && t.body.op === '⇒' ? conj(t.body.left) : [])];
-  // Bind the variables of the first guards first, so that they prune early
-  // (∀ a, b : NAME; d, e : DATE • (a ↦ d) ∈ f ∧ … binds a, d before b, e). Only when
-  // no declared set mentions a bound variable, so the order does not matter.
-  const bound = new Set(names.map((n) => n.name));
-  const closed = bound.size === names.length && names.every((n) => ![...freeVars(n.type)].some((f) => bound.has(f)));
-  if (closed && terms.length) {
-    const order: typeof names = [];
-    for (const g of terms) {
-      const fv = freeVars(g);
-      for (const n of names) if (fv.has(n.name) && !order.includes(n)) order.push(n);
-    }
-    for (const n of names) if (!order.includes(n)) order.push(n);
-    names = order;
-  }
-  const pos = new Map(names.map((n, i) => [n.name, i]));
-  const needOf = (x: Term) => {
-    let need = -1;
-    for (const f of freeVars(x)) {
-      const p = pos.get(f);
-      if (p !== undefined && p > need) need = p;
-    }
-    return need;
-  };
-  const guards = terms.map((term) => ({ term, need: needOf(term) }));
-  qi = { names, guards };
-  quantCache.set(t, qi);
-  return qi;
-}
-
-/** Number of bindings that violate the body (capped). */
+/**
+ * How badly the bindings violate the body: the sum of the body's distances over the
+ * failing bindings (capped). The verdict itself is the evaluator's, and the failing
+ * bindings are enumerated exactly as it does (same order, guards and work limit), so
+ * the distance is 0 exactly when the evaluator says true.
+ */
 function forall(t: Quant, env: Env, u: Universe): number {
-  const { names, guards } = quantInfo(t);
-  const saved = names.map((n) => (env.has(n.name) ? env.get(n.name) : undefined));
+  const h = holds(t, env, u);
+  if (h === true) return 0;
+  if (h === 'error') return 1;
   let fails = 0;
-
-  // `probe`: a value beyond the ℕ / ℤ window is bound; errors there are ignored,
-  // exactly as in the evaluator
-  const go = (i: number, g: number, probe: boolean): void => {
-    // evaluate the guards that are fully bound, in order; a false guard makes the
-    // whole subtree vacuously true (exactly as the short-circuiting evaluator would)
-    while (g < guards.length && guards[g].need < i) {
-      const h = holds(guards[g].term, env, u);
-      if (h === false) return;
-      if (h === 'error') break; // let the full evaluation report it
-      g++;
-    }
-    if (i === names.length) {
-      let ok: boolean;
-      try {
-        ok = (t.pred ? !evalPred(t.pred, env, u) : false) || evalPred(t.body, env, u);
-      } catch {
-        ok = probe;
-      }
-      if (!ok) fails++;
-      return;
-    }
-    const s = evalTerm(names[i].type, env, u);
-    if (!isSetLike(s)) throw new Error('not a set');
-    const list = bindingValues(s, env, u);
-    if (!list) throw new Error('too large');
-    for (let k = 0; k < list.values.length; k++) {
-      env.set(names[i].name, list.values[k]);
-      go(i + 1, g, probe || list.probe[k]);
-      if (fails >= MAX_FAIL) return;
-    }
-  };
-
   try {
-    go(0, 0, false);
-  } catch {
-    fails = Math.max(fails, 1);
-  } finally {
-    names.forEach((n, i) => {
-      const old = saved[i];
-      if (old === undefined) env.delete(n.name);
-      else env.set(n.name, old);
+    failingBindings(t, env, u, (e) => {
+      // a failing binding counts with the body's own distance, so that getting closer
+      // (e.g. one element fewer in a set that must be empty) is an improvement
+      fails += Math.max(1, dist(t.body, new Map(e), u));
+      return fails >= MAX_FAIL;
     });
+  } catch {
+    /* keep what was counted */
   }
-  return fails;
+  return Math.max(1, fails);
 }

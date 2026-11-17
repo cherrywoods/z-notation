@@ -44,13 +44,16 @@
       { "text": "A type for blood types", "check": { "given": "BLOODTYPE" } }
     ],
     "state": [
-      { "text": "The blood type of each unit", "check": { "var": "unitType" } },
-      { "text": "The blood type of each patient", "check": { "var": "patientType" } },
+      { "text": "The blood type of each unit and each patient", "check": { "var": ["unitType", "patientType"] } },
       { "text": "Which blood types are compatible", "check": { "var": "compatible" } },
       { "text": "Which unit was issued to which patient", "check": { "var": "issued" } },
       {
+        "text": "Each unit goes to at most one patient",
+        "check": { "holds": "∀ u ∈ dom issued; p₁, p₂ ∈ ran issued . (u ↦ p₁) ∈ issued ∧ (u ↦ p₂) ∈ issued ⇒ p₁ = p₂" }
+      },
+      {
         "text": "Patients only get compatible blood",
-        "check": { "holds": "∀ u : dom issued • (unitType(u) ↦ patientType(issued(u))) ∈ compatible" }
+        "check": { "holds": "∀ u ∈ dom issued; p ∈ ran issued . (u ↦ p) ∈ issued ⇒ (unitType(u) ↦ patientType(p)) ∈ compatible" }
       }
     ],
     "init": [
@@ -102,7 +105,7 @@
       { "text": "dom issued ⊆ dom unitType", "requirements": ["R1"] },
       { "text": "ran issued ⊆ dom patientType", "requirements": ["R2"] },
       {
-        "text": "∀ u : dom issued • (unitType(u) ↦ patientType(issued(u))) ∈ compatible",
+        "text": "∀ u ∈ dom issued . (unitType(u) ↦ patientType(issued(u))) ∈ compatible",
         "requirements": ["R4"],
         "hidden": true
       }

@@ -23,7 +23,9 @@ describe('explainers', () => {
       for (const t of texts) {
         if (!t) continue;
         // value literals (2.Feb) and '…' are handled by the renderer
-        const errors = lex(t.replace(/\d+\.[A-Za-z]+/g, 'v').replaceAll('…', ' ')).filter((k) => k.kind === 'error');
+        // (and a lone '.' is the quantifier period, also before the lexer knows it)
+        const errors = lex(t.replace(/\d+\.[A-Za-z]+/g, 'v').replaceAll('…', ' ').replace(/ \.(?= |\n)/g, ' •'))
+          .filter((k) => k.kind === 'error');
         expect(errors, `${id}: ${t}`).toEqual([]);
       }
       // backticks in plain text come in pairs
@@ -32,23 +34,23 @@ describe('explainers', () => {
   });
 
   it('instantiate Ξ and Δ with the state schema', () => {
-    const ctx = { stateName: 'Library', stateVars: ['onLoan', 'borrower'] };
+    const ctx = { stateName: 'Ward', stateVars: ['patients', 'allergic', 'prescribed'] };
     const xi = getExplainer('xi', ctx)!;
     expect(xi.definitionSchema).toEqual({
-      name: 'ΞLibrary',
-      decls: 'ΔLibrary',
-      preds: 'onLoan′ = onLoan\nborrower′ = borrower',
+      name: 'ΞWard',
+      decls: 'ΔWard',
+      preds: 'patients′ = patients\nallergic′ = allergic\nprescribed′ = prescribed',
     });
-    const delta = getExplainer('delta', { stateName: 'Ward', stateVars: ['patients'] })!;
-    expect(delta.definitionSchema).toEqual({ name: 'ΔWard', decls: 'Ward\nWard′' });
-    expect(delta.short).toContain('patients′');
+    const delta = getExplainer('delta', { stateName: 'Bank', stateVars: ['owner', 'balance'] })!;
+    expect(delta.definitionSchema).toEqual({ name: 'ΔBank', decls: 'Bank\nBank′' });
+    expect(delta.short).toContain('owner′, balance′');
   });
 
   it('mention the hovered identifier', () => {
-    expect(getExplainer('prime', { subject: 'borrower′' })!.short).toContain('`borrower′`');
-    expect(getExplainer('input', { subject: 'member?' })!.short).toContain('`member?`');
-    expect(getExplainer('output', { subject: 'books!' })!.short).toContain('`books!`');
-    expect(getExplainer('given', { subject: 'BOOK' })!.short).toContain('`BOOK`');
+    expect(getExplainer('prime', { subject: 'prescribed′' })!.short).toContain('`prescribed′`');
+    expect(getExplainer('input', { subject: 'p?' })!.short).toContain('`p?`');
+    expect(getExplainer('output', { subject: 'drugs!' })!.short).toContain('`drugs!`');
+    expect(getExplainer('given', { subject: 'PATIENT' })!.short).toContain('`PATIENT`');
     expect(getExplainer('nope')).toBeUndefined();
   });
 });
