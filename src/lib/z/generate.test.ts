@@ -699,6 +699,24 @@ describe('infinite sets and the search limits', () => {
     ]);
   });
 
+  it('stays fast for quantifiers over many bindings (the verdict is then ≈)', () => {
+    for (const extra of ['∀ a, b ∈ ℙ BOOK . a ∪ b = b ∪ a', '∀ a, b, c ∈ ℙ BOOK . a ∪ (b ∪ c) = (a ∪ b) ∪ c']) {
+      const spec = lib((s) => (s.state.preds += `\n${extra}`));
+      const an = analyseSpec(spec);
+      const wall = performance.now();
+      const [st, ms] = timed(() => exampleState(spec, an, 1));
+      const [op, ms2] = timed(() => exampleOperation(spec, an, 'op-lend', 1, 'applicable'));
+      expect(ms + ms2, extra).toBeLessThan(100);
+      expect(performance.now() - wall).toBeLessThan(2000); // (minutes before the work limit)
+      const mine = (c: { text: string }) => c.text.startsWith(extra.slice(0, 14));
+      expect(okState(st).checks.find(mine)).toMatchObject({ result: true, bounded: true });
+      expect(okOp(op).checks.filter(mine).map((c) => [c.origin, c.result, c.bounded])).toEqual([
+        ['invariant', true, true],
+        ['invariant′', true, true],
+      ]);
+    }
+  });
+
   it('gives exact verdicts for all templates (none relies on a cut-off)', () => {
     for (const t of TEMPLATES) {
       const spec = fullSpec(t);
@@ -845,7 +863,7 @@ describe('templates', () => {
       expect(sorted[sorted.length - 1]).toBeLessThan(90);
       // and in real time (~1–2 s on a laptop; generous, as tests may run under load)
       expect(performance.now() - wall).toBeLessThan(30000);
-    });
+    }, 60000); // (vitest's 5 s are too short when several runs share the machine)
   }
 
   it('finds blocked cases that follow from the invariant after (medication Prescribe)', () => {
@@ -929,6 +947,66 @@ describe('templates', () => {
       expect(ex.checks.every((c) => c.result === true && !c.bounded)).toBe(true);
       expect(byName(ex.after, 'prescribed′').status).toBe('computed');
     }
+  });
+
+  it('says when an undefined application is why there is no example (air traffic)', () => {
+    const t = TEMPLATES.find((x) => x.id === 'air-traffic-control');
+    if (!t) throw new Error('air-traffic-control template missing');
+    const spec = fullSpec(t);
+    spec.state.preds = spec.state.preds.replace('∀ a₁, a₂ ∈ dom cleared .', '∀ a₁, a₂ ∈ AIRCRAFT .');
+    const an = analyseSpec(spec);
+    const why = 'cleared(a₁) is undefined when a₁ ∉ dom cleared.';
+    const st = exampleState(spec, an, 1);
+    expect(st).toMatchObject({ ok: false, message: `No example found with small values: ${why}` });
+    if (!st.ok) expect(st.best?.failed[0].message).toMatch(/^cleared\(a₁\) is undefined: a₁ = \w+ ∉ dom cleared$/);
+    expect(exampleOperation(spec, an, spec.operations[0].id, 1, 'applicable')).toMatchObject({
+      ok: false,
+      reason: 'no-before',
+      message: `No example state found with small values: ${why}`,
+    });
+  });
+
+  it('takes value pools and fixed data through a binding (renamed sets and variables)', () => {
+    const rail = TEMPLATES.find((x) => x.id === 'railway-interlocking');
+    const blood = TEMPLATES.find((x) => x.id === 'blood-transfusion');
+    if (!rail || !blood) throw new Error('template missing');
+    // [Trains, Blocks, Signals] with protection renamed
+    const r = fullSpec(rail);
+    const rename = (text: string) =>
+      text.replace(/\bTRAIN\b/g, 'Trains').replace(/\bBLOCK\b/g, 'Blocks').replace(/\bSIGNAL\b/g, 'Signals').replace(/\bprotects\b/g, 'guards');
+    r.given = rename(r.given);
+    r.state.decls = rename(r.state.decls);
+    r.state.preds = rename(r.state.preds);
+    r.init = null;
+    r.operations = [];
+    const rb = { givens: { Trains: 'TRAIN', Blocks: 'BLOCK', Signals: 'SIGNAL' }, vars: { guards: { ref: 'protects' } } };
+    const ra = analyseSpec(r);
+    expect(ra.ok).toBe(true);
+    expect(exampleTypes(r, ra, 1, rb).carriers.map((c) => [c.name, c.values[0]])).toEqual([
+      ['Trains', 'ICE5'],
+      ['Blocks', 'B1'],
+      ['Signals', 'S1'],
+    ]);
+    const rs = okState(exampleState(r, ra, 1, { binding: rb }));
+    expect(byName(rs.vars, 'guards')).toMatchObject({ fixed: true, text: '{S1 ↦ B2, S2 ↦ B3, S3 ↦ B4, S4 ↦ B3, S5 ↦ B2, S6 ↦ B1}' });
+    // without the binding: generated names, no fixed data
+    expect(exampleTypes(r, ra, 1).carriers[0].values[0]).toBe('trains1');
+
+    // blood transfusion: compatible renamed, or written the other way round
+    const b = fullSpec(blood);
+    b.state.decls = b.state.decls.replace('compatible : BLOODTYPE ↔ BLOODTYPE', 'canReceiveFrom : BLOODTYPE ↔ BLOODTYPE');
+    b.state.preds = b.state.preds.replace('(unitType(u) ↦ patientType(issued(u))) ∈ compatible', '(patientType(issued(u)) ↦ unitType(u)) ∈ canReceiveFrom');
+    b.init = null;
+    b.operations = [];
+    const ba = analyseSpec(b);
+    expect(ba.ok).toBe(true);
+    const bb = { givens: { UNIT: 'UNIT', PATIENT: 'PATIENT', BLOODTYPE: 'BLOODTYPE' }, vars: { canReceiveFrom: { ref: 'compatible', inverse: true } } };
+    const bs = okState(exampleState(b, ba, 1, { binding: bb }));
+    const table = byName(bs.vars, 'canReceiveFrom');
+    expect(table.fixed).toBe(true);
+    expect(table.text).toContain('Opos ↦ Oneg'); // compatible has Oneg ↦ Opos
+    expect(table.text).not.toContain('Oneg ↦ Opos');
+    expect(bs.checks.every((c) => c.result === true)).toBe(true);
   });
 
   it('uses fixed values whatever the time budget (blood transfusion: compatible)', () => {

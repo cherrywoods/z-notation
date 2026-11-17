@@ -1240,7 +1240,7 @@ export function proveGoal(spec: SpecDoc, an: Analysis, schemaId: string, goal: T
     }
     const all = dedupe(premises);
     return {
-      derivation: { kind: 'facts', premises: strip(all), conclusion: printTerm(goal) },
+      derivation: explained(all, printTerm(goal)),
       stated: all.every((p) => p.src === 'own' || p.src === 'decl' || p.src === 'xi' || p.src === 'law'),
     };
   } catch {
@@ -1352,6 +1352,29 @@ function weakerKnown(c: Term, byKey: Map<string, Supported>): Supported | undefi
   return undefined;
 }
 
+/**
+ * A goal's derivation from its premises. An inferred premise (a guarantee, a derived
+ * effect) is replaced by how it was inferred: the goal itself, if it is that fact, by
+ * the fact's derivation (not "p? ∈ patients ⊢ p? ∈ patients"); otherwise by the premises
+ * of that derivation, where it lists them.
+ */
+function explained(ps: Premise[], conclusion: string): Derivation {
+  if (ps.length === 1 && ps[0].derivation) {
+    const d = ps[0].derivation;
+    if (d.kind === 'facts') return { kind: 'facts', premises: d.premises, conclusion };
+    if (ps[0].text === conclusion) return d;
+  }
+  const flat = ps.flatMap((p) => (p.derivation?.kind === 'facts' ? p.derivation.premises : [{ text: p.text, reason: p.reason }]));
+  const seen = new Set<string>();
+  const premises = flat.filter((p) => {
+    const k = `${p.text}\u0000${p.reason}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { kind: 'facts', premises, conclusion };
+}
+
 /** Everything known in a step, with its support. Own lines first. */
 function knownFacts(ctx: Ctx): Supported[] {
   const one = (term: Term, reason: string, src: PremiseSource): Supported => ({ term, premises: [{ text: printTerm(term), reason, src }] });
@@ -1377,11 +1400,21 @@ function knownFacts(ctx: Ctx): Supported[] {
       const vP = v + '′';
       if (defs.has(vP)) continue;
       const eff = deriveEffect(ctx, vP, defs);
-      if (eff) out.push(one(mk.rel('=', mk.name(vP), eff.result), 'derived from the invariant', 'inv'));
+      if (eff) {
+        const s = one(mk.rel('=', mk.name(vP), eff.result), 'derived from the invariant', 'inv');
+        s.premises[0].derivation = chainOf(vP, eff.steps);
+        out.push(s);
+      }
     }
     for (const f of guaranteedFacts(ctx)) {
       const t = parseTerm(f.text).term;
-      if (t) for (const c of conjuncts(t)) out.push(one(c, 'guaranteed by the invariant', 'inv'));
+      const cs = t ? conjuncts(t) : [];
+      for (const c of cs) {
+        const s = one(c, 'guaranteed by the invariant', 'inv');
+        // its derivation explains it (for the whole guarantee only: a conjunct is a weaker claim)
+        if (cs.length === 1 && f.derivation) s.premises[0].derivation = f.derivation;
+        out.push(s);
+      }
     }
   }
   return out;

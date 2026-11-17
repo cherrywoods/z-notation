@@ -19,6 +19,7 @@ import { children, freeVars, nameTerm, primeTerm, printTerm, splitName } from '.
 import { TypeChecker, typeOnlyRewrite, type Binding, type NameTerm, type Scope } from './typecheck';
 import { given, power, typeToString, type ZType } from './types';
 import { determinations, frozenVars } from './frame';
+import { domainWarnings } from './definedness';
 import { key } from './infer/terms';
 
 export {
@@ -193,6 +194,8 @@ export function analyseSpec(spec: SpecDoc): Analysis {
     const importsState = s.role === 'init' ? s.initImport != null : s.imports != null || s.vars.some((v) => v.role === 'state');
     s.ok = givenOk && clean(s.id) && (!importsState || state.ok);
   }
+  // warnings only (the ok flags stay): applications that may be undefined
+  for (const s of schemas) domainWarnings(s, givenSets, report);
 
   return {
     givenSets,

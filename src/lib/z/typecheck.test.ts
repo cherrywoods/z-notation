@@ -656,6 +656,164 @@ describe('frame convention and pointwise updates', () => {
     const both = withdraw((p) => p.replace(/^balance′ = .*$/m, 'balance′(a?) = balance(a?) - amount?\ndom balance′ = dom balance'));
     expect(analyseSpec(both).diagnostics).toEqual([]);
   });
+
+  it('does not warn when a ∀ line keeps the other values', () => {
+    const pointwise = (forall: string) => withdraw((p) => p.replace(/^balance′ = .*$/m, `balance′(a?) = balance(a?) - amount?\n${forall}`));
+    const warnings = (s: SpecDoc) => analyseSpec(s).diagnostics.map((d) => d.message);
+    // dom balance′ = dom owner′ = dom owner = dom balance (invariant, owner′ = owner)
+    expect(warnings(pointwise('∀ a ∈ dom balance . a ≠ a? ⇒ balance′(a) = balance(a)'))).toEqual([]);
+    expect(warnings(pointwise('∀ a ∈ dom owner | a ≠ a? . balance(a) = balance′(a)'))).toEqual([]);
+    // the guard leaves out a point that is not fixed
+    const gap = pointwise('∀ a ∈ dom balance . a ≠ a? ∧ a ≠ b? ⇒ balance′(a) = balance(a)');
+    gap.operations.find((o) => o.name === 'Withdraw')!.decls += '\nb? : ACCOUNT';
+    expect(warnings(gap)).toEqual([
+      'This only fixes balance′(a?). Other values of balance′ could change too — say what happens to the whole function, e.g. ‘balance′ = …’.',
+    ]);
+    // dom balance′ is open without the invariant line dom balance = dom owner
+    const open = pointwise('∀ a ∈ dom balance . a ≠ a? ⇒ balance′(a) = balance(a)');
+    open.state.preds = open.state.preds.replace('dom balance = dom owner', 'dom balance ⊆ dom owner');
+    expect(warnings(open)).toContain(
+      'This only fixes balance′(a?). Other values of balance′ could change too — say what happens to the whole function, e.g. ‘balance′ = …’.',
+    );
+    // a total function: the ∀ over its source set covers everything
+    const roles = spec(
+      '[USER, ROLE]',
+      ['Access', 'users : ℙ USER\nroles : USER → ℙ ROLE', ''],
+      [['AssignRole', 'ΔAccess\nuser? : USER\nrole? : ROLE', 'user? ∈ users\nroles′(user?) = roles(user?) ∪ {role?}\n∀ u ∈ USER . u ≠ user? ⇒ roles′(u) = roles(u)']],
+    );
+    expect(warnings(roles)).toEqual([]);
+    roles.operations[0].preds = roles.operations[0].preds.replace(/\n∀.*$/, '');
+    expect(warnings(roles)).toEqual([
+      'This only fixes roles′(user?). Other values of roles′ could change too — say what happens to the whole function, e.g. ‘roles′ = …’.',
+    ]);
+  });
+});
+
+describe('frame convention: what the invariant determines', () => {
+  const railway = referenceSpecOf('railway-interlocking')!;
+  /** Railway with red signals as a state variable, tied to green by `inv`. */
+  const withRed = (inv: string, op = 'ClearSignal') => {
+    const s = structuredClone(railway);
+    s.state.decls += '\nred : ℙ SIGNAL';
+    s.state.preds += '\n' + inv;
+    return { s, id: s.operations.find((o) => o.name === op)!.id };
+  };
+  const frameOf = (s: SpecDoc, id: string) =>
+    analyseSpec(s)
+      .byId[id].preds.filter((p) => p.origin === 'frame')
+      .map((p) => printTerm(p.term));
+
+  it.each([
+    ['red = SIGNAL ∖ green'],
+    ['green = SIGNAL ∖ red'],
+    ['red ∪ green = SIGNAL\nred ∩ green = ∅'],
+    ['∀ s ∈ SIGNAL . s ∈ red ⇔ s ∉ green'],
+  ])('derives red′ when green′ changes: %s', (inv) => {
+    const { s, id } = withRed(inv);
+    expect(frameOf(s, id)).toEqual([]);
+    const ex = exampleOperation(s, analyseSpec(s), id, 1, 'applicable');
+    if (!ex.ok) throw new Error(ex.message);
+    expect(ex.after.find((v) => v.name === 'red′')?.status).not.toBe('free');
+  });
+
+  it('keeps both unchanged when neither is mentioned', () => {
+    const { s } = withRed('green = SIGNAL ∖ red');
+    s.operations.push({ id: 'op-move', role: 'operation', name: 'Move', decls: 'ΔInterlocking\nt? : TRAIN\nb? : BLOCK', preds: 'at′ = at ∪ {t? ↦ b?}' });
+    expect(frameOf(s, 'op-move')).toEqual(['protects′ = protects', 'green′ = green', 'red′ = red']);
+  });
+
+  it('derives a variable defined from a frozen and a changed one', () => {
+    // can depends on holds (changed) and grants (unchanged by the convention)
+    const s = structuredClone(referenceSpecOf('access-control')!);
+    s.state.decls += '\ncan : USER ↔ PERMISSION';
+    s.state.preds += '\ncan = {u ∈ USER; p ∈ PERMISSION | ∃ r ∈ ROLE . (u ↦ r) ∈ holds ∧ (r ↦ p) ∈ grants . u ↦ p}';
+    const op = s.operations.find((o) => o.name === 'AssignRole')!;
+    op.preds = op.preds.replace('\ngrants′ = grants', '');
+    expect(frameOf(s, op.id)).toEqual(['grants′ = grants']);
+  });
+
+  it('says so when the convention breaks the invariant (a shape it does not recognise)', () => {
+    const { s, id } = withRed('red ∩ green = ∅\n∀ s ∈ SIGNAL . s ∈ red ∨ s ∈ green');
+    expect(frameOf(s, id)).toEqual(['red′ = red']);
+    const ex = exampleOperation(s, analyseSpec(s), id, 1, 'applicable');
+    expect(!ex.ok && ex.message).toBe(
+      "‘red′ = red’ is assumed because ClearSignal doesn't mention red′, but that contradicts the invariant. Say how red changes.",
+    );
+  });
+
+  it('does not blame the convention for a wrong precondition', () => {
+    // at′ = at is right; the precondition is the wrong way round
+    const s = structuredClone(railway);
+    const op = s.operations.find((o) => o.name === 'ClearSignal')!;
+    op.preds = op.preds.replace('protects(s?) ∉ ran at', 'protects(s?) ∈ ran at').replace('\nat′ = at', '');
+    const ex = exampleOperation(s, analyseSpec(s), op.id, 1, 'applicable');
+    expect(!ex.ok && ex.message).toMatch(/^No after-state found with small values/);
+  });
+});
+
+describe('applications outside the domain', () => {
+  const atc = referenceSpecOf('air-traffic-control')!;
+  /** ATC with one line replaced, in the state or an operation. */
+  const edit = (where: string, from: string, to: string) => {
+    const s = structuredClone(atc);
+    const doc = where === 'state' ? s.state : s.operations.find((o) => o.name === where)!;
+    expect(doc.preds).toContain(from);
+    doc.preds = doc.preds.replace(from, to);
+    return s;
+  };
+  const warnings = (s: SpecDoc) =>
+    analyseSpec(s)
+      .diagnostics.filter((d) => d.kind === 'undefined')
+      .map((d) => {
+        const doc = [s.state, s.init, ...s.operations].find((x) => x?.id === d.section.schemaId)!;
+        return `${doc.preds.slice(d.from, d.to)}: ${d.message}`;
+      });
+
+  it('warns about an unguarded application in the invariant', () => {
+    expect(warnings(edit('state', '∀ a₁, a₂ ∈ dom cleared', '∀ a₁, a₂ ∈ AIRCRAFT'))).toEqual([
+      'cleared(a₁): cleared(a₁) is only defined when a₁ ∈ dom cleared.',
+    ]);
+    expect(
+      warnings(edit('state', '∀ a₁, a₂ ∈ dom cleared . cleared(a₁) = cleared(a₂) ⇒ a₁ = a₂', '∀ r ∈ ran cleared . #{a ∈ AIRCRAFT | cleared(a) = r} = 1')),
+    ).toEqual(['cleared(a): cleared(a) is only defined when a ∈ dom cleared.']);
+  });
+
+  it('says when it blocks an operation', () => {
+    expect(warnings(edit('ClearToLand', 'cleared′ = cleared ∪ {a? ↦ r?}', 'cleared′ = (cleared ∖ {a? ↦ cleared(a?)}) ∪ {a? ↦ r?}'))).toEqual([
+      'cleared(a?): cleared(a?) is only defined when a? ∈ dom cleared, so ClearToLand is blocked when a? ∉ dom cleared.',
+    ]);
+  });
+
+  it.each([
+    ['∀ b ∈ AIRCRAFT . b ∈ dom cleared ⇒ cleared(b) ≠ r?'],
+    ['∀ b ∈ AIRCRAFT . b ∉ dom cleared ∨ cleared(b) ≠ r?'],
+    ['∀ b ∈ AIRCRAFT | b ∈ dom cleared . cleared(b) ≠ r?'],
+    ['∀ b ∈ dom cleared . cleared(b) ≠ r?'],
+    ['r? ∉ {b ∈ dom cleared . cleared(b)}'],
+  ])('stays silent when guarded: %s', (line) => {
+    expect(warnings(edit('ClearToLand', 'r? ∉ ran cleared', line))).toEqual([]);
+  });
+
+  it('uses the other lines and the invariant (dom balance = dom owner)', () => {
+    const s = structuredClone(referenceSpecOf('bank-account')!);
+    expect(analyseSpec(s).diagnostics).toEqual([]);
+    s.state.preds = s.state.preds.replace('dom balance = dom owner', 'dom balance ⊆ dom owner');
+    expect(warnings(s)).toContain('balance(a?): balance(a?) is only defined when a? ∈ dom balance, so Withdraw is blocked when a? ∉ dom balance.');
+  });
+
+  it('nothing in the six reference specs', () => {
+    const raw = import.meta.glob('/templates/*.json', { eager: true, import: 'default' }) as Record<string, { extraOperations?: { name: string; declarations: { text: string }[]; predicates: { text: string }[] }[] }>;
+    for (const [path, t] of Object.entries(raw)) {
+      const id = path.replace(/^.*\//, '').replace(/\.json$/, '');
+      const s = structuredClone(referenceSpecOf(id)!);
+      for (const o of t.extraOperations ?? []) {
+        if (s.operations.some((x) => x.name === o.name)) continue;
+        const text = (ls: { text: string }[]) => ls.map((l) => l.text).join('\n');
+        s.operations.push({ id: `op-extra-${o.name}`, role: 'operation', name: o.name, decls: text(o.declarations), preds: text(o.predicates) });
+      }
+      expect(analyseSpec(s).diagnostics, id).toEqual([]);
+    }
+  });
 });
 
 describe('TypeChecker directly', () => {

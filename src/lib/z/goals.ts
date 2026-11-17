@@ -40,13 +40,13 @@
 import type { Derivation, SchemaDoc, SpecDoc } from '../spec/model';
 import { proveGoal } from './infer';
 import type { Term } from './ast';
-import { enumerateSet, evalPred, evalTerm, type Env, type Universe } from './eval';
+import { enumerateSet, evalPred, evalTerm, memberOfDeclared, type Env, type Universe } from './eval';
 import { exampleInit, exampleOperation, exampleState, universeFor } from './generate';
 import { deterministically } from './gen/clock';
 import { analyseSpec, type Analysis, type SchemaInfo, type VarInfo } from './index';
 import { parseTerm } from './parser';
 import { freeVars, nameTerm, printTerm, rename, substitute } from './print';
-import type { ShownVar } from './results';
+import type { ExampleBinding, ShownVar } from './results';
 import { power, product, relationParts, typeEquals, type ZType } from './types';
 import { int, isPair, isSetLike, mkSet, pair, printValue, valueKey, type Value } from './values';
 
@@ -133,16 +133,31 @@ function check(spec: SpecDoc, an: Analysis, reference: SpecDoc, goals: TemplateG
   const ref = refAnalysis(reference);
   const out: Record<string, GoalStatus[]> = {};
 
-  // the steps with goals, and their samples (examples of the student's spec)
-  const steps: Step[] = [];
   const nSeeds = opts.seeds ?? 10;
   const budget = opts.sampleBudgetMs;
   const mode = opts.deterministic ? 'work' : 'time';
-  const stateSamples = goals.state || goals.init || goals.ops ? samplesFor(spec, an, 'state', nSeeds, mode, budget) : [];
+  const initPrimed = an.byId.init?.initImport === 'primed';
+  const search = opts.search ?? null;
+  goalsByReference.set(referenceId(reference), goals);
+  // the matching, chosen on examples of the student's state; if the student's names
+  // differ from the template's, the examples are made again with the template's pools
+  // and fixed data for what they stand for (the binding), and the matching chosen again
+  const sampling = goals.state || goals.init || goals.ops;
+  let stateSamples = sampling ? samplesFor(spec, an, 'state', nSeeds, mode, budget) : [];
+  let { gm, sm } = chooseMatching(spec, an, ref, goals.state ? { key: 'state', kind: 'state', goals: goals.state, samples: stateSamples } : undefined, stateSamples, { initPrimed, mode, search });
+  let binding: ExampleBinding | undefined = bindingOf(gm, sm);
+  if (sameAsByName(binding, spec, an)) binding = undefined;
+  else {
+    stateSamples = sampling ? samplesFor(spec, an, 'state', nSeeds, mode, budget, binding) : [];
+    ({ gm, sm } = chooseMatching(spec, an, ref, goals.state ? { key: 'state', kind: 'state', goals: goals.state, samples: stateSamples } : undefined, stateSamples, { initPrimed, mode, search, binding }));
+  }
+
+  // the steps with goals, and their samples (examples of the student's spec)
+  const steps: Step[] = [];
   if (goals.state) steps.push({ key: 'state', kind: 'state', goals: goals.state, samples: stateSamples });
   if (goals.init) {
     // without valid states there are no valid initial states either
-    const samples = stateSamples.length ? samplesFor(spec, an, 'init', opts.initSeeds ?? 6, mode, budget) : [];
+    const samples = stateSamples.length ? samplesFor(spec, an, 'init', opts.initSeeds ?? 6, mode, budget, binding) : [];
     steps.push({ key: 'init', kind: 'init', goals: goals.init, samples });
   }
   const missingOps = new Set<string>();
@@ -155,16 +170,13 @@ function check(spec: SpecDoc, an: Analysis, reference: SpecDoc, goals: TemplateG
       out[id] = gs.map((g) => ({ text: g.text, achieved: false }));
       continue;
     }
-    const samples = stateSamples.length ? samplesFor(spec, an, id, nSeeds, mode, budget) : [];
+    const samples = stateSamples.length ? samplesFor(spec, an, id, nSeeds, mode, budget, binding) : [];
     steps.push({ key: id, kind: 'op', goals: gs, samples, student, refOp: ref.byId[id] });
   }
 
-  const initPrimed = an.byId.init?.initImport === 'primed';
-  const search = opts.search ?? null;
-  const { gm, sm } = chooseMatching(spec, an, ref, steps.find((st) => st.kind === 'state'), stateSamples, { initPrimed, mode, search });
   const givenMap = gm;
   const typeOf = translator(givenMap);
-  const ctx: Ctx = { givenMap, initPrimed, mode, search };
+  const ctx: Ctx = { givenMap, initPrimed, mode, search, binding };
   if (goals.types) {
     out.types = goals.types.map((g) => {
       const achieved = !!g.check.given && [...givenMap.keys()].some((r) => normGiven(r) === normGiven(g.check.given!));
@@ -176,7 +188,7 @@ function check(spec: SpecDoc, an: Analysis, reference: SpecDoc, goals: TemplateG
   const results = new Map<string, boolean[]>();
   const oms = new Map<string, Map<string, Match>>();
   for (const step of steps) {
-    const fp = stepKey(spec, step.key);
+    const fp = stepKey(spec, step.key, ctx.binding);
     let stepBest: boolean[] | null = null;
     let stepOm = new Map<string, Match>();
     let stepSim = 0;
@@ -203,11 +215,11 @@ function check(spec: SpecDoc, an: Analysis, reference: SpecDoc, goals: TemplateG
   }
   // goals of every template: not stricter than the requirements
   const rs = refSide(reference, ref, an, sm, givenMap);
-  if (goals.state && out.state) out.state = [...out.state, allowsStates(rs, an, sm, stateStep, ctx)];
+  if (goals.state && out.state) out.state = [...out.state, allowsStates(spec, rs, an, sm, stateStep, ctx)];
   for (const id of missingOps) out[id] = [...out[id], { text: RUNS_WHEN, achieved: false }];
   for (const step of steps) {
     if (step.kind !== 'op') continue;
-    out[step.key] = [...out[step.key], runsWhen(rs, an, step, sm, oms.get(step.key) ?? new Map(), ctx)];
+    out[step.key] = [...out[step.key], runsWhen(spec, rs, an, step, sm, oms.get(step.key) ?? new Map(), ctx)];
   }
   return out;
 }
@@ -230,7 +242,7 @@ const MAX_GIVEN_MAPS = 24;
 function chooseMatching(spec: SpecDoc, an: Analysis, ref: Analysis, stateStep: Step | undefined, stateSamples: Sample[], c: Omit<Ctx, 'givenMap'>): Chosen {
   const refState = ref.byId.state?.vars.filter((v) => v.role === 'state') ?? [];
   const stuState = an.byId.state?.vars.filter((v) => v.role === 'state') ?? [];
-  const fp = stepKey(spec, 'state');
+  const fp = stepKey(spec, 'state', c.binding);
   const key = JSON.stringify([fp, c.mode, stateSamples.length, stateStep?.goals ?? null, ref.givenSets, refState.map((v) => [v.name, printTerm(v.declared)]), c.initPrimed]);
   const hit = chosenCache.get(key);
   if (hit) return hit;
@@ -278,6 +290,51 @@ function givenBijections(refs: string[], stus: string[]): { map: Map<string, str
   return out.sort((a, b) => b.sim - a.sim).slice(0, MAX_GIVEN_MAPS);
 }
 
+/**
+ * Which template given sets and state variables the student's stand for, so that the
+ * examples use the template's value pools and fixed data for them (a renamed or reversed
+ * compatibility table still gets the template's table, the right way round). Based on
+ * the matching the goal check chooses (by the State goals given, or those of the last
+ * goal check against this reference). Memoised.
+ */
+export function exampleBinding(spec: SpecDoc, an: Analysis, reference: SpecDoc, goals?: TemplateGoals): ExampleBinding {
+  return deterministically(() => {
+    const ref = refAnalysis(reference);
+    const stateGoals = goals?.state ?? goalsByReference.get(referenceId(reference))?.state;
+    const samples = stateGoals ? samplesFor(spec, an, 'state', 10, 'work') : [];
+    const c = { initPrimed: an.byId.init?.initImport === 'primed', mode: 'work' as const, search: null };
+    const { gm, sm } = chooseMatching(spec, an, ref, stateGoals ? { key: 'state', kind: 'state', goals: stateGoals, samples } : undefined, samples, c);
+    return bindingOf(gm, sm);
+  });
+}
+
+const goalsByReference = new Map<string, TemplateGoals>();
+const referenceId = (reference: SpecDoc) => reference.topicId ?? JSON.stringify(reference);
+
+function bindingOf(gm: Map<string, string>, sm: Map<string, Match>): ExampleBinding {
+  const givens: Record<string, string> = {};
+  for (const [r, x] of gm) givens[x] = r;
+  const vars: ExampleBinding['vars'] = {};
+  for (const [r, m] of sm) {
+    if (m.kind === 'id') vars[m.stu] = { ref: r };
+    else if (m.kind === 'inverse') vars[m.stu] = { ref: r, inverse: true };
+  }
+  return { givens, vars };
+}
+
+/** Does the binding give the same pools and fixed data as going by names? */
+function sameAsByName(b: ExampleBinding, spec: SpecDoc, an: Analysis): boolean {
+  if (Object.entries(b.givens).some(([x, r]) => x !== r)) return false;
+  const fixed = spec.fixed ?? {};
+  const stateVars = new Set(an.byId.state?.vars.filter((v) => v.role === 'state').map((v) => v.name) ?? []);
+  for (const name of Object.keys(fixed)) {
+    if (!stateVars.has(name)) continue;
+    const v = b.vars[name];
+    if (!v || v.ref !== name || v.inverse) return false;
+  }
+  return Object.entries(b.vars).every(([x, v]) => !(v.ref in fixed) || (x === v.ref && !v.inverse));
+}
+
 /** Whether a reference declaration holds for the student's (converted) values. */
 type DeclVerdict = { ok: true } | { ok: false; evidence?: GoalEvidence };
 
@@ -295,15 +352,17 @@ function declVerdicts(spec: SpecDoc, an: Analysis, step: Step, sm: Map<string, M
     if (!m.decl) continue;
     const stu = inStudentNames(m.decl, names, ctx);
     const bad = step.samples.find((smp) => !holdsIn(m.decl!, names, ctx, smp));
+    const fails = (smp: Sample) => shrink(smp, an.byId.state, (env) => !holdsIn(m.decl!, names, ctx, { ...smp, env }));
     if (!step.samples.length) out.set(r, { ok: false });
-    else if (bad) out.set(r, { ok: false, evidence: counterexample(bad, stu ?? m.decl, names) });
+    else if (bad) out.set(r, { ok: false, evidence: counterexample(fails(bad), stu ?? m.decl, names) });
     else if (!stu) out.set(r, { ok: true });
     else open.push({ r, ref: m.decl, stu });
   }
   const found = refuteTerms(spec, step, open, names, ctx, false, an);
   open.forEach((c, i) => {
     const smp = found.get(i);
-    out.set(c.r, smp ? { ok: false, evidence: counterexample(smp, c.stu, names) } : { ok: true });
+    const small = smp && shrink(smp, an.byId.state, (env) => !holdsIn(c.ref, names, ctx, { ...smp, env }));
+    out.set(c.r, small ? { ok: false, evidence: counterexample(small, c.stu, names) } : { ok: true });
   });
   return out;
 }
@@ -313,7 +372,7 @@ const judgeCache = new Map<string, GoalStatus[]>();
 /** `judge`, memoised by everything its verdicts depend on. */
 function judged(spec: SpecDoc, an: Analysis, step: Step, sampled: boolean[], names: Map<string, Match>, decls: Map<string, DeclVerdict>, admits: Map<string, DeclVerdict>, ctx: Ctx): GoalStatus[] {
   const key = JSON.stringify([
-    stepKey(spec, step.key),
+    stepKey(spec, step.key, ctx.binding),
     ctx.mode,
     step.samples.length,
     step.goals,
@@ -383,14 +442,19 @@ function judge(spec: SpecDoc, an: Analysis, step: Step, sampled: boolean[], name
     // 2a. an example already breaks it
     const bad = step.samples.find((smp) => !holdsIn(ref, names, ctx, smp));
     if (bad) {
-      out[i] = { text: g.text, achieved: false, evidence: counterexample(bad, stu ?? ref, names) };
+      const small = shrink(bad, an.byId[schemaIdOf(an, step)], (env) => !holdsIn(ref, names, ctx, { ...bad, env }));
+      out[i] = { text: g.text, achieved: false, evidence: counterexample(small, stu ?? ref, names) };
       return;
     }
     pending.push(i);
   });
   // 2b. a targeted search for a valid example in which the goal is false
   const found = refuted(spec, an, step, pending, names, ctx, false);
-  for (const [i, smp] of found) out[i] = { text: step.goals[i].text, achieved: false, evidence: counterexample(smp, stuTerms.get(i)!, names) };
+  for (const [i, smp] of found) {
+    const ref = holdsTerm(step.goals[i], names, ctx)!;
+    const small = shrink(smp, an.byId[schemaIdOf(an, step)], (env) => !holdsIn(ref, names, ctx, { ...smp, env }));
+    out[i] = { text: step.goals[i].text, achieved: false, evidence: counterexample(small, stuTerms.get(i)!, names) };
+  }
   // 3. no proof, no counterexample: it held in all examples tried
   const rest = pending.filter((i) => !found.has(i));
   const notStated = step.kind === 'state' ? new Map<number, Sample>() : refuted(spec, an, step, rest, names, ctx, true);
@@ -508,18 +572,43 @@ function shownFromReference(smp: Sample, show: [string, Match][]): ShownVar[] {
   });
 }
 
-/** Proven from the reference's own premises (the step's predicates and invariant)? Memoised. */
-function provenOnReference(rs: RefSide, schemaId: string, t: Term): boolean {
+type Premises = { text: string; reason: string }[];
+
+/** The premises proving `t` from the reference's step (its predicates and invariant), or null. Memoised. */
+function provenOnReference(rs: RefSide, schemaId: string, t: Term): Premises | null {
   const key = JSON.stringify([stepKey(rs.reference, schemaId), printTerm(t)]);
   let r = refProofCache.get(key);
   if (r === undefined) {
-    r = !!proveGoal(rs.reference, rs.ref, schemaId, t);
+    const p = proveGoal(rs.reference, rs.ref, schemaId, t);
+    r = p && p.derivation.kind === 'facts' ? p.derivation.premises : null;
     refProofCache.set(key, r);
     if (refProofCache.size > 512) refProofCache.delete(refProofCache.keys().next().value!);
   }
   return r;
 }
-const refProofCache = new Map<string, boolean>();
+const refProofCache = new Map<string, Premises | null>();
+
+/** One proof from several: all premises (each once), and what follows. */
+function combined(premises: Premises[], conclusions: string[]): GoalEvidence {
+  const seen = new Set<string>();
+  const all = premises.flat().filter((p) => {
+    const k = `${p.text}\u0000${p.reason}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { kind: 'proof', derivation: { kind: 'facts', premises: all, conclusion: conclusions.join('\n') } };
+}
+
+const autoCache = new Map<string, unknown>();
+/** Memoised automatic checks (they only change when the student's step or the matching does). */
+function memoAuto<T>(key: string, f: () => T): T {
+  if (autoCache.has(key)) return autoCache.get(key) as T;
+  const r = f();
+  autoCache.set(key, r);
+  if (autoCache.size > CACHE_SIZE) autoCache.delete(autoCache.keys().next().value!);
+  return r;
+}
 
 /**
  * Var goals: the student's declaration must admit the reference's values (one allergy
@@ -527,6 +616,10 @@ const refProofCache = new Map<string, boolean>();
  * Only for declarations that do not admit them by their form.
  */
 function admitVerdicts(reference: SpecDoc, ref: Analysis, an: Analysis, sm: Map<string, Match>, givenMap: Map<string, string>, stateGoals: Goal[], ctx: Ctx): Map<string, DeclVerdict> {
+  const key = JSON.stringify(['admit', stepKey(reference, 'state'), JSON.stringify(an.byId.state?.vars.map((v) => [v.name, printTerm(v.declared)])), [...givenMap], namesKey(sm), stateGoals, ctx.mode, ctx.search]);
+  return memoAuto(key, () => admitVerdicts1(reference, ref, an, sm, givenMap, stateGoals, ctx));
+}
+function admitVerdicts1(reference: SpecDoc, ref: Analysis, an: Analysis, sm: Map<string, Match>, givenMap: Map<string, string>, stateGoals: Goal[], ctx: Ctx): Map<string, DeclVerdict> {
   const out = new Map<string, DeclVerdict>();
   const wanted = new Set(stateGoals.flatMap((g) => (g.check.holds || g.check.var === undefined ? [] : Array.isArray(g.check.var) ? g.check.var : [g.check.var])));
   const rs = refSide(reference, ref, an, sm, givenMap);
@@ -542,7 +635,8 @@ function admitVerdicts(reference: SpecDoc, ref: Analysis, an: Analysis, sm: Map<
   const found = refuteOnReference(rs, 'state', checks.map((c) => c.t), [], ctx);
   checks.forEach((c, i) => {
     const smp = found.get(i);
-    out.set(c.r, smp ? { ok: false, evidence: { kind: 'counterexample', vars: shownFromReference(smp, [[c.r, c.m]]) } } : { ok: true });
+    const small = smp && shrink(smp, ref.byId.state, (env) => truthIn(c.t, env, smp.u) === false);
+    out.set(c.r, small ? { ok: false, evidence: { kind: 'counterexample', vars: shownFromReference(small, [[c.r, c.m]]) } } : { ok: true });
   });
   return out;
 }
@@ -566,18 +660,35 @@ function admitsByForm(stu: VarInfo, ref: VarInfo, m: Match, givenMap: Map<string
  * (in the student's encoding) satisfies the student's state predicates. Needs every
  * reference state variable matched.
  */
-function allowsStates(rs: RefSide, an: Analysis, sm: Map<string, Match>, stateStep: Step, ctx: Ctx): GoalStatus {
+function allowsStates(spec: SpecDoc, rs: RefSide, an: Analysis, sm: Map<string, Match>, stateStep: Step, ctx: Ctx): GoalStatus {
+  const key = JSON.stringify(['allows', stepKey(spec, 'state', ctx.binding), rs.key, stateStep.samples.length, ctx.mode, ctx.search]);
+  return memoAuto(key, () => allowsStates1(rs, an, sm, stateStep, ctx));
+}
+function allowsStates1(rs: RefSide, an: Analysis, sm: Map<string, Match>, stateStep: Step, ctx: Ctx): GoalStatus {
   const refState = rs.ref.byId.state?.vars.filter((v) => v.role === 'state') ?? [];
   if (!refState.length || !refState.every((v) => sm.has(v.name)) || !stateStep.samples.length) return { text: ALLOWS_STATES, achieved: false };
   const own = (an.byId.state?.preds ?? []).filter((p) => p.origin === 'own' && p.ok);
-  const preds = own.flatMap((p) => {
+  const proofs: Premises[] = [];
+  const preds: Term[] = [];
+  const lines: string[] = [];
+  for (const p of own) {
     const t = translate(p.term, rs.toRef, rs.givens);
-    return t && !provenOnReference(rs, rs.ref.byId.state!.id, t) ? [t] : [];
-  });
+    if (!t) continue;
+    lines.push(printTerm(p.term));
+    const proof = provenOnReference(rs, rs.ref.byId.state!.id, t);
+    if (proof) proofs.push(proof);
+    else preds.push(t);
+  }
   const found = refuteOnReference(rs, 'state', preds, [], ctx);
-  const smp = [...found.values()][0];
-  if (smp) return { text: ALLOWS_STATES, achieved: false, evidence: { kind: 'counterexample', vars: shownFromReference(smp, [...sm]) } };
-  return preds.length ? { text: ALLOWS_STATES, achieved: true, via: 'stated', evidence: { kind: 'examples' } } : { text: ALLOWS_STATES, achieved: true, via: 'stated' };
+  const first = [...found][0];
+  if (first) {
+    const [i, smp] = first;
+    const small = shrink(smp, rs.ref.byId.state, (env) => truthIn(preds[i], env, smp.u) === false);
+    return { text: ALLOWS_STATES, achieved: false, evidence: { kind: 'counterexample', vars: shownFromReference(small, [...sm]) } };
+  }
+  // every line follows from the requirements' invariant: proven
+  if (!preds.length) return { text: ALLOWS_STATES, achieved: true, via: 'stated', ...(lines.length ? { evidence: combined(proofs, lines) } : {}) };
+  return { text: ALLOWS_STATES, achieved: true, via: 'stated', evidence: { kind: 'examples' } };
 }
 
 /**
@@ -587,7 +698,11 @@ function allowsStates(rs: RefSide, an: Analysis, sm: Map<string, Match>, stateSt
  * equations force (Ξ, the frame convention, v′ = …), must not rule them out. A targeted
  * search looks for a reference example that breaks one of the student's preconditions.
  */
-function runsWhen(rs: RefSide, an: Analysis, step: Extract<Step, { kind: 'op' }>, sm: Map<string, Match>, om: Map<string, Match>, ctx: Ctx): GoalStatus {
+function runsWhen(spec: SpecDoc, rs: RefSide, an: Analysis, step: Extract<Step, { kind: 'op' }>, sm: Map<string, Match>, om: Map<string, Match>, ctx: Ctx): GoalStatus {
+  const key = JSON.stringify(['runs', stepKey(spec, step.key, ctx.binding), rs.key, namesKey(om), step.samples.length, ctx.mode, ctx.search]);
+  return memoAuto(key, () => runsWhen1(rs, an, step, sm, om, ctx));
+}
+function runsWhen1(rs: RefSide, an: Analysis, step: Extract<Step, { kind: 'op' }>, sm: Map<string, Match>, om: Map<string, Match>, ctx: Ctx): GoalStatus {
   const refOp = step.refOp;
   const refState = rs.ref.byId.state?.vars.filter((v) => v.role === 'state') ?? [];
   const refIO = refOp?.vars.filter((v) => v.role === 'input' || v.role === 'output') ?? [];
@@ -601,20 +716,36 @@ function runsWhen(rs: RefSide, an: Analysis, step: Extract<Step, { kind: 'op' }>
   const refInputs = new Set(refIO.filter((v) => v.role === 'input').map((v) => v.name));
   const isBefore = (n: string) => refState.some((v) => v.name === n) || refInputs.has(n);
   const show = (smp: Sample): ShownVar[] => shownFromReference(smp, [...[...sm], ...[...om].filter(([r]) => refInputs.has(r))]);
+  // 0. the reference's own outcome satisfies all of the student's lines: proven
+  const own = preds.filter((p) => p.origin !== 'invariant');
+  const proofs = own.map((p) => {
+    const t = tr(p.term);
+    return t && provenOnReference(rs, step.key, t);
+  });
+  if (own.length && proofs.every((p) => p)) {
+    return { text: RUNS_WHEN, achieved: true, via: 'stated', evidence: combined(proofs as Premises[], own.filter((p) => p.origin === 'own').map((p) => printTerm(p.term))) };
+  }
   // 1. the reference's sampled examples: the student's predicates with the forced values
   const samples = samplesFor(rs.reference, rs.ref, step.key, 10, ctx.mode);
+  const blocked = (full: Env, u: Universe): boolean => {
+    const env = new Map<string, Value>([...full].filter(([n]) => isBefore(n)));
+    if (!before.every((p) => truthIn(p, env, u) !== false)) return false;
+    forceValues(rest, env, u);
+    return rest.some((p) => [...freeVars(p)].every((n) => env.has(n) || n in u.carriers) && truthIn(p, env, u) === false);
+  };
   for (const smp of samples) {
-    const env = new Map<string, Value>([...smp.env].filter(([n]) => isBefore(n)));
-    if (!before.every((p) => truthIn(p, env, smp.u) !== false)) continue;
-    forceValues(rest, env, smp.u);
-    const blocked = rest.some((p) => [...freeVars(p)].every((n) => env.has(n) || n in smp.u.carriers) && truthIn(p, env, smp.u) === false);
-    if (blocked) return { text: RUNS_WHEN, achieved: false, evidence: { kind: 'counterexample', vars: show(smp) } };
+    if (blocked(smp.env, smp.u)) return { text: RUNS_WHEN, achieved: false, evidence: { kind: 'counterexample', vars: show(shrink(smp, rs.ref.byId[step.key], (env) => blocked(env, smp.u))) } };
   }
   // 2. a targeted search for a reference example that breaks a precondition of the student's
   const pre = rest.filter((p) => [...freeVars(p)].every((n) => isBefore(n) || rs.ref.givenSets.includes(n)) && !provenOnReference(rs, step.key, p));
+  void an;
   const found = refuteOnReference(rs, step.key, pre, before, ctx);
-  const smp = [...found.values()][0];
-  if (smp) return { text: RUNS_WHEN, achieved: false, evidence: { kind: 'counterexample', vars: show(smp) } };
+  const first = [...found][0];
+  if (first) {
+    const [i, smp] = first;
+    const small = shrink(smp, rs.ref.byId[step.key], (env) => truthIn(pre[i], env, smp.u) === false && before.every((p) => truthIn(p, env, smp.u) === true));
+    return { text: RUNS_WHEN, achieved: false, evidence: { kind: 'counterexample', vars: show(small) } };
+  }
   return { text: RUNS_WHEN, achieved: true, via: 'stated', evidence: { kind: 'examples' } };
 }
 
@@ -642,6 +773,83 @@ function forceValues(preds: Term[], env: Map<string, Value>, u: Universe): void 
   }
 }
 
+// ── smaller counterexamples ────────────────────────────────────────────────────
+
+const SHRINK_TRIES = 120;
+
+/**
+ * A smaller counterexample: set elements dropped (with the same element of v′ / v when
+ * both have it) and numbers moved towards 0, one at a time, while the example stays
+ * valid (the schema's predicates and declarations) and still `bad`. At most
+ * SHRINK_TRIES candidates (deterministic).
+ */
+function shrink(smp: Sample, schema: SchemaInfo | undefined, bad: (env: Env) => boolean): Sample {
+  if (!schema) return smp;
+  let env = new Map(smp.env);
+  let tries = 0;
+  const accept = (e: Map<string, Value>) => ++tries <= SHRINK_TRIES && validWithDecls(schema, e, smp.u) && bad(e);
+  for (let changed = true; changed && tries < SHRINK_TRIES; ) {
+    changed = false;
+    for (const n of [...env.keys()]) {
+      const partner = n.endsWith('′') ? n.slice(0, -1) : n + '′';
+      for (const [cand, removed] of smaller(env.get(n)!)) {
+        if (tries >= SHRINK_TRIES) break;
+        const e = new Map(env);
+        e.set(n, cand);
+        if (accept(e)) {
+          env = e;
+          changed = true;
+          break;
+        }
+        const pv = env.get(partner);
+        if (removed && pv?.k === 'set' && pv.index.has(valueKey(removed))) {
+          e.set(partner, mkSet(pv.elems.filter((x) => valueKey(x) !== valueKey(removed))));
+          if (accept(e)) {
+            env = e;
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (tries === 0) return smp;
+  const vars = smp.vars.map((w) => {
+    const v = env.get(w.name);
+    if (!v || v === smp.env.get(w.name)) return w;
+    return { ...w, value: v, text: printValue(v), alternative: undefined, alternativeValue: undefined, status: w.status === 'free' ? ('chosen' as const) : w.status };
+  });
+  return { env, u: smp.u, vars };
+}
+
+/** Smaller versions of a value: without one element; numbers (also in pairs) nearer to 0. */
+function* smaller(v: Value): Generator<[Value, Value | null]> {
+  if (v.k === 'set') {
+    for (const e of v.elems) yield [mkSet(v.elems.filter((x) => x !== e)), e];
+    for (const e of v.elems) {
+      if (!isPair(e) || e.elems[1].k !== 'int' || e.elems[1].v === 0) continue;
+      for (const n of nearerZero(e.elems[1].v)) yield [mkSet(v.elems.map((x) => (x === e ? pair(e.elems[0], int(n)) : x))), null];
+    }
+  }
+  if (v.k === 'int' && v.v !== 0) for (const n of nearerZero(v.v)) yield [int(n), null];
+}
+
+const nearerZero = (n: number): number[] => [...new Set([0, Math.trunc(n / 2), n - Math.sign(n)])].filter((m) => Math.abs(m) < Math.abs(n));
+
+/** The schema's predicates and declarations hold for the values in `env`. */
+function validWithDecls(schema: SchemaInfo, env: Map<string, Value>, u: Universe): boolean {
+  if (!valid(schema, env, u)) return false;
+  return schema.vars.every((v) => {
+    const x = env.get(v.name);
+    if (!x) return true;
+    try {
+      return memberOfDeclared(x, v.declared, env, u);
+    } catch {
+      return false;
+    }
+  });
+}
+
 // ── steps and samples ──────────────────────────────────────────────────────────
 
 interface Sample {
@@ -657,6 +865,8 @@ type Step =
 
 interface Ctx {
   givenMap: Map<string, string>;
+  /** Which template given sets and variables the student's stand for (pools, fixed data). */
+  binding?: ExampleBinding;
   /** Effort of the counterexample search (null: the defaults per step kind). */
   search: SearchEffort | null;
   /** How the time budgets are counted ('work': deterministically). */
@@ -673,18 +883,18 @@ const CACHE_SIZE = 64;
  * the examples depend on. Sampling stops after two seeds in a row without an example
  * (a failing search costs the most and the next seeds would most likely fail too).
  */
-function samplesFor(spec: SpecDoc, an: Analysis, stepId: string, n: number, mode: Ctx['mode'], budgetMs?: number): Sample[] {
+function samplesFor(spec: SpecDoc, an: Analysis, stepId: string, n: number, mode: Ctx['mode'], budgetMs?: number, binding?: ExampleBinding): Sample[] {
   const doc: SchemaDoc | null | undefined =
     stepId === 'state' ? spec.state : stepId === 'init' ? spec.init : spec.operations.find((o) => o.id === stepId);
   if (!doc) return [];
-  const key = JSON.stringify([n, mode, budgetMs, stepKey(spec, stepId)]);
+  const key = JSON.stringify([n, mode, budgetMs, stepKey(spec, stepId, binding)]);
   const hit = sampleCache.get(key);
   if (hit) return hit;
-  return sampleFor(spec, an, stepId, n, key, budgetMs);
+  return sampleFor(spec, an, stepId, n, key, budgetMs, binding);
 }
 
 /** Everything the examples of a step depend on. */
-function stepKey(spec: SpecDoc, stepId: string): string {
+function stepKey(spec: SpecDoc, stepId: string, binding?: ExampleBinding): string {
   const doc: SchemaDoc | null | undefined =
     stepId === 'state' ? spec.state : stepId === 'init' ? spec.init : spec.operations.find((o) => o.id === stepId);
   return JSON.stringify([
@@ -700,16 +910,17 @@ function stepKey(spec: SpecDoc, stepId: string): string {
     doc?.preds,
     // numbers written anywhere in the spec are example candidates
     allText(spec).match(/\d+/g)?.join(','),
+    binding ?? null,
   ]);
 }
 
-function sampleFor(spec: SpecDoc, an: Analysis, stepId: string, n: number, key: string, budgetMs?: number): Sample[] {
-  const opts = budgetMs ? { budgetMs } : undefined;
+function sampleFor(spec: SpecDoc, an: Analysis, stepId: string, n: number, key: string, budgetMs?: number, binding?: ExampleBinding): Sample[] {
+  const opts = budgetMs || binding ? { ...(budgetMs ? { budgetMs } : {}), ...(binding ? { binding } : {}) } : undefined;
   const schema = an.byId[stepId];
   const samples: Sample[] = [];
   let misses = 0;
   for (let seed = 1; seed <= n; seed++) {
-    const u = universeFor(spec, an, seed);
+    const u = universeFor(spec, an, seed, binding);
     let vars: ShownVar[] | null = null;
     if (stepId === 'state') {
       const ex = exampleState(spec, an, seed, opts);
@@ -901,12 +1112,12 @@ function refuteTerms(spec: SpecDoc, step: Step, terms: { ref: Term; stu: Term }[
   const out = new Map<number, Sample>();
   let pending = terms.map((_, i) => i);
   if (!pending.length) return out;
-  const key = JSON.stringify([stepKey(spec, step.key), ctx.mode, ctx.search, relaxed, terms.map((t) => printTerm(t.stu))]);
+  const key = JSON.stringify([stepKey(spec, step.key, ctx.binding), ctx.mode, ctx.search, relaxed, terms.map((t) => printTerm(t.stu))]);
   const hit = refuteCache.get(key);
   if (hit) return new Map(hit);
   for (let round = 0; pending.length && round <= terms.length; round++) {
     const someFalse = pending.map((i) => negate(terms[i].stu)).reduce((a, b) => orTerm(a, b));
-    const sample = search(spec, an, step, someFalse, relaxed, ctx.search ?? SEARCH[step.kind]);
+    const sample = search(spec, an, step, someFalse, relaxed, ctx.search ?? SEARCH[step.kind], ctx.binding);
     if (!sample) break;
     const failed = pending.filter((i) => !holdsIn(terms[i].ref, names, ctx, sample));
     if (!failed.length) break;
@@ -919,8 +1130,8 @@ function refuteTerms(spec: SpecDoc, step: Step, terms: { ref: Term; stu: Term }[
 }
 
 /** A valid example of the step that satisfies `extra` (tried with `effort.seeds` seeds), or null. */
-function search(spec: SpecDoc, an: Analysis, step: Step, extra: Term, relaxed: boolean, effort: SearchEffort): Sample | null {
-  const opts = { extra, relaxed, budgetMs: effort.ms };
+function search(spec: SpecDoc, an: Analysis, step: Step, extra: Term, relaxed: boolean, effort: SearchEffort, binding?: ExampleBinding): Sample | null {
+  const opts = { extra, relaxed, budgetMs: effort.ms, ...(binding ? { binding } : {}) };
   for (let seed = 1; seed <= effort.seeds; seed++) {
     let vars: ShownVar[] | null = null;
     if (step.kind === 'state') {
@@ -933,7 +1144,7 @@ function search(spec: SpecDoc, an: Analysis, step: Step, extra: Term, relaxed: b
       const ex = exampleOperation(spec, an, step.key, seed, 'applicable', opts);
       vars = ex.ok && ex.status === 'applicable' ? [...ex.before, ...ex.inputs, ...ex.after, ...ex.outputs] : null;
     }
-    if (vars) return { env: new Map(vars.map((v) => [v.name, v.value] as [string, Value])), u: universeFor(spec, an, seed), vars };
+    if (vars) return { env: new Map(vars.map((v) => [v.name, v.value] as [string, Value])), u: universeFor(spec, an, seed, binding), vars };
   }
   return null;
 }
@@ -1272,6 +1483,7 @@ export function clearGoalCache(): void {
   refuteCache.clear();
   refuteRefCache.clear();
   refProofCache.clear();
+  autoCache.clear();
   chosenCache.clear();
   judgeCache.clear();
   sampledCache.clear();

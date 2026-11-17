@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SpecDoc } from '../spec/model';
 import { TOPICS, createSpec, goalsOf, referenceSpecOf } from '../spec/topics';
-import { checkGoals, clearGoalCache, type GoalStatus, type TemplateGoals } from './goals';
+import { checkGoals, clearGoalCache, exampleBinding, type GoalStatus, type TemplateGoals } from './goals';
 import { analyseSpec } from './index';
 import { lex } from './lexer';
 
@@ -383,6 +383,25 @@ describe('matching by use, not by name', () => {
     expect(listed(run(s, t), false)).toEqual([]);
   });
 
+  it('tells the examples which template sets and variables the student\'s stand for', () => {
+    const railway = byId('railway-interlocking');
+    const s = renameGivens(railway.ref, { TRAIN: 'Trains', BLOCK: 'Blocks', SIGNAL: 'Signals' });
+    s.state.decls = s.state.decls.replace('protects', 'layout');
+    for (const d of [s.state, ...s.operations]) d.preds = d.preds.replace(/protects/g, 'layout');
+    s.pools = {};
+    expect(analyseSpec(s).ok).toBe(true);
+    const b = exampleBinding(s, analyseSpec(s), railway.ref, railway.goals);
+    expect(b.givens).toEqual({ Trains: 'TRAIN', Blocks: 'BLOCK', Signals: 'SIGNAL' });
+    expect(b.vars.layout).toEqual({ ref: 'protects' });
+    // a table kept under its name but read the other way round
+    const t = structuredClone(blood.ref);
+    const flip = (x: string) => x.replace(/\(unitType\((\w\??)\) ↦ patientType\(([^()]*(?:\([^()]*\))?)\)\) ∈ compatible/g, '(patientType($2) ↦ unitType($1)) ∈ compatible');
+    t.state.preds = flip(t.state.preds);
+    for (const o of t.operations) o.preds = flip(o.preds);
+    expect(exampleBinding(t, analyseSpec(t), blood.ref, blood.goals).vars.compatible).toEqual({ ref: 'compatible', inverse: true });
+    expect(listed(run(t, blood), false)).toEqual([]);
+  });
+
   it('MEDICINE for DRUG', () => {
     const s = renameGivens(medication.ref, { DRUG: 'MEDICINE' });
     expect(listed(run(s, medication), false)).toEqual([]);
@@ -478,7 +497,8 @@ describe('not stricter than the requirements', () => {
     const m = structuredClone(medication.ref);
     setOp(m, 'Prescribe', 'ΞWard\np? : PATIENT\ndrug? : DRUG', 'p? ∈ patients\n(p? ↦ drug?) ∉ allergic\nprescribed′ = prescribed ∪ {p? ↦ drug?}');
     expect(goal(run(m, medication), 'op-prescribe', RUNS)).toMatchObject({ achieved: false, evidence: { kind: 'counterexample' } });
-    expect(goal(run(medication.ref, medication), 'op-prescribe', RUNS)).toMatchObject({ achieved: true, evidence: { kind: 'examples' } });
+    // the reference's outcome meets every line of the reference: proven
+    expect(goal(run(medication.ref, medication), 'op-prescribe', RUNS)).toMatchObject({ achieved: true, evidence: { kind: 'proof' } });
   });
 });
 
@@ -601,7 +621,7 @@ describe('no false greens, and stated vs inferred', () => {
         gs.forEach((g, i) => {
           const holds = i >= goals.length || goals[i].check.holds !== undefined; // (automatic goals at the end)
           const kind = g.evidence?.kind;
-          if (g.achieved) expect(holds && i < goals.length ? ['proof', 'examples'] : [undefined, 'examples'], `${t.id} ${step}: ${g.text}`).toContain(kind);
+          if (g.achieved) expect(holds ? (i < goals.length ? ['proof', 'examples'] : [undefined, 'proof', 'examples']) : [undefined, 'examples'], `${t.id} ${step}: ${g.text}`).toContain(kind);
           else expect([undefined, 'counterexample'], `${t.id} ${step}: ${g.text}`).toContain(kind);
         });
       }

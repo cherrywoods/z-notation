@@ -15,7 +15,7 @@ import type { Analysis, PredInfo, SchemaInfo, VarInfo } from './index';
 import { parseTerm } from './parser';
 import { children, freeVars, nameTerm, printTerm } from './print';
 import { frameConflictMessage, framesIn } from './frame';
-import type { OpExample, PredCheck, ShownVar, StateExample, TypesExample } from './results';
+import type { ExampleBinding, OpExample, PredCheck, ShownVar, StateExample, TypesExample } from './results';
 import type { ZType } from './types';
 import { EMPTY, atom, int, mkSet, printValue, tuple, valueEquals, type Value } from './values';
 import { compileDom, completeEnum, emptyValue, intScaleFor, isEmptyDom, type Dom } from './gen/dom';
@@ -37,17 +37,17 @@ const INT_MAX = 20;
  * (TRAIN → train1, train2, …) plus the values used by `spec.fixed`. The carriers do not
  * depend on the seed, so every step of the example lives in the same world.
  */
-export function universeFor(spec: SpecDoc, an: Analysis, seed: number): Universe {
+export function universeFor(spec: SpecDoc, an: Analysis, seed: number, binding?: ExampleBinding): Universe {
   return guard(
-    () => buildUniverse(spec, an, seed).u,
+    () => buildUniverse(spec, an, seed, binding).u,
     () => ({ carriers: {}, intMin: INT_MIN, intMax: INT_MAX }),
   );
 }
 
-export function exampleTypes(spec: SpecDoc, an: Analysis, seed: number): TypesExample {
+export function exampleTypes(spec: SpecDoc, an: Analysis, seed: number, binding?: ExampleBinding): TypesExample {
   return guard(
     () => {
-      const u = universeFor(spec, an, seed);
+      const u = universeFor(spec, an, seed, binding);
       return {
         kind: 'types',
         carriers: an.givenSets.map((name) => ({ name, values: (u.carriers[name] ?? []).map(printValue) })),
@@ -94,18 +94,43 @@ const cleanPool = (spec: SpecDoc, set: string): string[] => {
   return [...new Set(pool.filter((n): n is string => typeof n === 'string' && n.trim() !== ''))];
 };
 
-function buildUniverse(spec: SpecDoc, an: Analysis, seed: number): { u: Universe; fixedRaw: Map<string, RawFixed> } {
+/**
+ * The value pool of a given set: by the binding (the template's set it stands for, e.g.
+ * Trains → TRAIN), else by its own name.
+ */
+const poolOf = (spec: SpecDoc, set: string, binding?: ExampleBinding): string[] => {
+  const ref = binding?.givens[set];
+  const pool = ref !== undefined ? cleanPool(spec, ref) : [];
+  return pool.length ? pool : cleanPool(spec, set);
+};
+
+/**
+ * The fixed example data of the state variables: by the binding (the template variable
+ * whose value a variable takes, maybe the other way round), else by name.
+ */
+function fixedTexts(spec: SpecDoc, binding?: ExampleBinding): { name: string; text: string; inverse: boolean }[] {
+  const fixed = spec.fixed ?? {};
+  const has = (k: string) => Object.prototype.hasOwnProperty.call(fixed, k) && typeof fixed[k] === 'string';
+  if (!binding) return Object.keys(fixed).filter(has).map((name) => ({ name, text: fixed[name], inverse: false }));
+  return Object.entries(binding.vars).flatMap(([name, b]) => (has(b.ref) ? [{ name, text: fixed[b.ref], inverse: !!b.inverse }] : []));
+}
+
+function buildUniverse(spec: SpecDoc, an: Analysis, seed: number, binding?: ExampleBinding): { u: Universe; fixedRaw: Map<string, RawFixed> } {
   const state = stateSchema(an);
   const fixedRaw = new Map<string, RawFixed>();
   const required = new Map<string, Set<string>>();
   const exact = new Set<string>();
-  for (const [name, text] of Object.entries(spec.fixed ?? {})) {
+  for (const { name, text, inverse } of fixedTexts(spec, binding)) {
     const info = state?.vars.find((v) => v.name === name && v.role === 'state');
-    if (!info || typeof text !== 'string') continue;
+    if (!info) continue;
     const { term } = parseTerm(text);
     if (!term) continue;
     const atoms: { set: string; name: string }[] = [];
-    const value = termToValue(term, info.type, spec, atoms);
+    // the other way round: read the text as a relation Y ↔ X, then swap the pairs
+    const type = inverse ? swapped(info.type) : info.type;
+    if (!type) continue;
+    let value = termToValue(term, type, spec, atoms, binding);
+    if (value && inverse) value = swapPairs(value);
     if (!value) continue;
     fixedRaw.set(name, { value, info });
     for (const a of atoms) {
@@ -114,14 +139,14 @@ function buildUniverse(spec: SpecDoc, an: Analysis, seed: number): { u: Universe
     }
     // a fixed total function X → Y needs exactly its domain as the carrier of X
     const d = info.declared;
-    if (d.kind === 'binop' && d.op === '→' && d.left.kind === 'name') exact.add(d.left.name);
+    if (!inverse && d.kind === 'binop' && d.op === '→' && d.left.kind === 'name') exact.add(d.left.name);
   }
 
   void seed; // the carriers are the same for every seed
   const carriers: Record<string, Value[]> = {};
   for (const set of an.givenSets) {
     const req = required.get(set) ?? new Set<string>();
-    const pool = cleanPool(spec, set);
+    const pool = poolOf(spec, set, binding);
     if (pool.length) {
       // a fixed total function X → Y fixes the carrier of X to exactly its domain
       const chosen = exact.has(set) && req.size ? req : new Set(pool);
@@ -135,10 +160,28 @@ function buildUniverse(spec: SpecDoc, an: Analysis, seed: number): { u: Universe
         .sort((a, b) => (a.ord ?? 0) - (b.ord ?? 0));
     }
   }
-  const infinite = (spec.infinite ?? []).filter((n) => an.givenSets.includes(n));
+  // infinite: by the binding too
+  const inf = new Set(spec.infinite ?? []);
+  const infinite = an.givenSets.filter((n) => inf.has(n) || (binding?.givens[n] !== undefined && inf.has(binding.givens[n])));
   // numbers of the spec and their neighbours are tried when ℕ / ℤ are listed
   const probes = [...new Set(specConstants(an).flatMap((n) => [n - 1, n, n + 1]))];
   return { u: { carriers, intMin: INT_MIN, intMax: INT_MAX, infinite, probes }, fixedRaw };
+}
+
+/** The type of a relation the other way round (X ↔ Y → Y ↔ X), or null if it is none. */
+function swapped(t: ZType): ZType | null {
+  if (t.k !== 'power' || t.elem.k !== 'product' || t.elem.elems.length !== 2) return null;
+  return { ...t, elem: { ...t.elem, elems: [t.elem.elems[1], t.elem.elems[0]] } };
+}
+
+function swapPairs(v: Value): Value | null {
+  if (v.k !== 'set') return null;
+  const out: Value[] = [];
+  for (const e of v.elems) {
+    if (e.k !== 'tuple' || e.elems.length !== 2) return null;
+    out.push(tuple([e.elems[1], e.elems[0]]));
+  }
+  return mkSet(out);
 }
 
 /** Position of `train3` in the default carrier of TRAIN (2), or null. */
@@ -150,11 +193,11 @@ function defaultOrd(set: string, name: string): number | null {
 }
 
 /** A fixed value written as a Z set display, read with the variable's type (atoms by pool). */
-function termToValue(t: Term, type: ZType, spec: SpecDoc, atoms: { set: string; name: string }[]): Value | null {
+function termToValue(t: Term, type: ZType, spec: SpecDoc, atoms: { set: string; name: string }[], binding?: ExampleBinding): Value | null {
   switch (type.k) {
     case 'given': {
       if (t.kind !== 'name') return null;
-      const pool = cleanPool(spec, type.name);
+      const pool = poolOf(spec, type.name, binding);
       const ord = pool.length ? pool.indexOf(t.name) : defaultOrd(type.name, t.name);
       if (ord === null || ord < 0) return null;
       atoms.push({ set: type.name, name: t.name });
@@ -169,7 +212,7 @@ function termToValue(t: Term, type: ZType, spec: SpecDoc, atoms: { set: string; 
       if (t.kind !== 'setDisplay') return null;
       const elems: Value[] = [];
       for (const e of t.elems) {
-        const v = termToValue(e, type.elem, spec, atoms);
+        const v = termToValue(e, type.elem, spec, atoms, binding);
         if (!v) return null;
         elems.push(v);
       }
@@ -181,7 +224,7 @@ function termToValue(t: Term, type: ZType, spec: SpecDoc, atoms: { set: string; 
       if (!parts || parts.length !== type.elems.length) return null;
       const elems: Value[] = [];
       for (let i = 0; i < parts.length; i++) {
-        const v = termToValue(parts[i], type.elems[i], spec, atoms);
+        const v = termToValue(parts[i], type.elems[i], spec, atoms, binding);
         if (!v) return null;
         elems.push(v);
       }
@@ -192,9 +235,10 @@ function termToValue(t: Term, type: ZType, spec: SpecDoc, atoms: { set: string; 
   }
 }
 
-function prepare(spec: SpecDoc, an: Analysis, seed: number, budgetMs = BUDGET): Prepared {
+function prepare(spec: SpecDoc, an: Analysis, seed: number, search?: SearchOptions): Prepared {
+  const budgetMs = search?.budgetMs ?? BUDGET;
   const start = now();
-  const { u, fixedRaw } = buildUniverse(spec, an, seed);
+  const { u, fixedRaw } = buildUniverse(spec, an, seed, search?.binding);
   const fixed = new Map<string, Value>();
   for (const [name, { value, info }] of fixedRaw) {
     try {
@@ -309,7 +353,7 @@ export function exampleState(spec: SpecDoc, an: Analysis, seed: number, search?:
 }
 
 function stateExample(spec: SpecDoc, an: Analysis, seed: number, search?: SearchOptions): StateExample {
-  const prep = prepare(spec, an, seed, search?.budgetMs);
+  const prep = prepare(spec, an, seed, search);
   const st = stateSchema(an);
   if (!st) return { kind: 'state', ok: true, vars: [], checks: [] };
   return schemaExample(prep, st, makeRng(seed, 'state'), {
@@ -333,7 +377,7 @@ export function exampleInit(spec: SpecDoc, an: Analysis, seed: number, search?: 
 }
 
 function initExample(spec: SpecDoc, an: Analysis, seed: number, search?: SearchOptions): StateExample {
-  const prep = prepare(spec, an, seed, search?.budgetMs);
+  const prep = prepare(spec, an, seed, search);
   const init = an.schemas.find((s) => s.role === 'init');
   if (!init) return { kind: 'state', ok: false, message: 'There is no Init schema.' };
   if (!init.initImport) return { kind: 'state', ok: false, message: 'Init does not import the state yet.' };
@@ -481,6 +525,11 @@ export interface SearchOptions {
   relaxed?: boolean;
   /** Time budget in ms (default: the normal example budget). */
   budgetMs?: number;
+  /**
+   * Which template given sets and variables the spec's own ones stand for, so that they
+   * get the template's value pools and fixed data (default: by equal names).
+   */
+  binding?: ExampleBinding;
 }
 
 /** Predicates a relaxed search keeps: the schema's own lines and Ξ's v′ = v. */
@@ -523,7 +572,7 @@ function operationExample(
   given?: Readonly<Record<string, Value>>,
   search?: SearchOptions,
 ): OpExample {
-  const prep = prepare(spec, an, seed, search?.budgetMs);
+  const prep = prepare(spec, an, seed, search);
   const op = an.byId[opId];
   if (!op || op.role !== 'operation') return { kind: 'op', ok: false, reason: 'no-input', message: 'Unknown operation.' };
   const vars = usableVars(op, prep);
@@ -725,20 +774,22 @@ function applicableCase(x: OpParts, rng: Rng, src: BeforeSource): OpExample | nu
   const broken = failedPreds.find((p) => p.origin === 'invariant′');
   const xi = failedPreds.find((p) => p.origin === 'xi');
   const frame = failedPreds.find((p) => p.origin === 'frame');
-  // frame lines (v′ = v) in the broken invariant: to blame if dropping them lets it hold
+  // frame lines (v′ = v) in the broken invariant are to blame if, without them, an
+  // after-state exists in which the invariant pins those variables to other values
+  let unframed: PredInfo[] = [];
   const frames = broken && !xi && !frame ? framesIn(x.op, broken.term) : [];
-  const unframed =
-    frames.length > 0 &&
-    solve(
-      { u: prep.u, known: A.env, unknowns: afterUnknowns(x), cons: x.preds.filter((p) => !frames.includes(p) && mentionsAny(p, [...x.after, ...x.outputs])).map((p) => hard(p)) },
-      rng,
-      { maxSteps: 1500, deadline: Math.max(prep.deadline, now() + prep.budget * 0.15), softSteps: 0 },
-    ).ok;
+  if (frames.length) {
+    const deadline = Math.max(prep.deadline, now() + prep.budget * 0.15);
+    const cons = x.preds.filter((p) => !frames.includes(p) && mentionsAny(p, [...x.after, ...x.outputs])).map((p) => hard(p));
+    const problem: Problem = { u: prep.u, known: A.env, unknowns: afterUnknowns(x), cons };
+    const C = solve(problem, rng, { maxSteps: 1500, deadline, softSteps: 0 });
+    if (C.ok) unframed = frames.filter((p) => p.term.kind === 'rel' && p.term.left.kind === 'name' && typeof findWitness(problem, p.term.left.name, C.env, rng, deadline) === 'string');
+  }
   let message: string;
   // (only the Ξ / frame conflicts are certain; otherwise larger values might still work)
   if (xi) message = `No after-state fits: Ξ keeps ${q(printTerm(xi.term))}.`;
   else if (frame && frame.term.kind === 'rel') message = frameConflictMessage(x.op.name, [frame]);
-  else if (unframed) message = frameConflictMessage(x.op.name, frames);
+  else if (unframed.length) message = frameConflictMessage(x.op.name, unframed);
   else if (broken) message = `No after-state found with small values: ${q(printTerm(broken.term))} fails.`;
   else if (failedPreds.length) message = `No after-state found with small values: ${q(printTerm(failedPreds[0].term))} fails.`;
   else if (B.badDecls.length) {
@@ -748,7 +799,10 @@ function applicableCase(x: OpParts, rng: Rng, src: BeforeSource): OpExample | nu
       : 'No after-state found with small values.';
   } else message = 'No after-state found with small values.';
   const failedChecks = failedPreds.map((p) => check(p, B.env, prep.u));
-  if (!xi && !frame) message = why('No after-state found with small values.', failedChecks.slice(0, 1)) === 'No after-state found with small values.' ? message : why('No after-state found with small values.', failedChecks.slice(0, 1));
+  // (an undefined f(x) in the failing predicate is the likely cause: say so)
+  const base = 'No after-state found with small values.';
+  const withWhy = why(base, failedChecks.slice(0, 1));
+  if (!xi && !frame && withWhy !== base) message = withWhy;
   return {
     kind: 'op',
     ok: false,

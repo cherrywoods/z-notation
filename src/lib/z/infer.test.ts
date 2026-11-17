@@ -761,3 +761,23 @@ describe('equalities forced by a total function (→ instead of ⇸)', () => {
     expect(r.redundant.filter((d) => d.section.schemaId === 'op-view-prescriptions')).toEqual([]);
   });
 });
+
+describe('of two equivalent lines, the later one is marked', () => {
+  it('Init: dom w = ∅ / ran w = ∅ next to w = ∅', () => {
+    const bank = structuredClone(referenceSpecOf('bank-account')!);
+    bank.init!.preds += '\ndom overdraft = ∅';
+    const rb = run(bank);
+    expect(flags(bank, rb, 'init')).toEqual(['dom overdraft = ∅']);
+    expect(flagOn(bank, rb, 'dom overdraft = ∅').message).toBe('Already follows from ‘owner = ∅’ and the state invariant.');
+
+    const rail = structuredClone(referenceSpecOf('railway-interlocking')!);
+    rail.init!.preds += '\nran at = ∅';
+    const rr = run(rail);
+    expect(flags(rail, rr, 'init')).toEqual(['ran at = ∅']);
+    expect(flagOn(rail, rr, 'ran at = ∅').message).toBe('Already follows from ‘at = ∅’.');
+
+    // written the other way round, the later line is still the one marked
+    rail.init!.preds = 'ran at = ∅\nat = ∅\ngreen = ∅';
+    expect(flags(rail, run(rail), 'init')).toEqual(['at = ∅']);
+  });
+});

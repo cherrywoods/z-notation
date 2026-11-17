@@ -9,6 +9,7 @@
 // Iterative deepening keeps derivations as short as possible; every rule is a valid
 // law of set theory, so a found derivation is always correct.
 
+import type { Derivation } from '../../spec/model';
 import type { Term } from '../ast';
 import { freeVars, printTerm } from '../print';
 import { rewriteOnce, type LawEnv } from './rewrite';
@@ -21,6 +22,8 @@ export interface Premise {
   text: string;
   reason: string;
   src: PremiseSource;
+  /** For an inferred fact (a guarantee, a derived effect): how it was inferred. */
+  derivation?: Derivation;
 }
 
 export interface Atom {

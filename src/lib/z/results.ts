@@ -6,6 +6,17 @@ import type { Derivation, SectionRef, ZDiagnostic } from '../spec/model';
 
 // ── examples ────────────────────────────────────────────────────────────────
 
+/**
+ * Which template names the student's own names stand for, so that examples use the
+ * template's value pools and fixed data (e.g. [Trains, Blocks, Signals] for TRAIN, …).
+ */
+export interface ExampleBinding {
+  /** student given set → template given set (for its value pool) */
+  givens: Record<string, string>;
+  /** student state variable → template variable whose fixed value it takes; inverse = pairs swapped */
+  vars: Record<string, { ref: string; inverse?: boolean }>;
+}
+
 /** One variable of an example, e.g. `borrower = {Dune ↦ Ada}`. */
 export interface ShownVar {
   /** Decorated name: 'onLoan', 'onLoan′', 'book?', 'member!'. */
