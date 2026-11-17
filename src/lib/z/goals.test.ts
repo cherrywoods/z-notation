@@ -502,6 +502,37 @@ describe('not stricter than the requirements', () => {
   });
 });
 
+describe('evidence that explains', () => {
+  const medication = byId('medication');
+
+  it('shows small counterexamples (one pair each, not four)', () => {
+    const s = structuredClone(medication.ref);
+    s.state.preds = 'dom allergic ⊆ patients\ndom prescribed ⊆ patients';
+    const g = run(s, medication).state.find((x) => x.text === 'Nobody gets a drug they are allergic to')!;
+    expect(g.evidence?.kind).toBe('counterexample');
+    const vars = g.evidence?.kind === 'counterexample' ? g.evidence.vars : [];
+    for (const name of ['allergic', 'prescribed']) {
+      const v = vars.find((x) => x.name === name)!;
+      expect(v.value.k === 'set' && v.value.elems.length, `${name} = ${v.text}`).toBe(1);
+    }
+  });
+
+  it('a proof that rests on an inferred fact shows how it was inferred', () => {
+    const s = structuredClone(medication.ref);
+    s.operations.find((o) => o.name === 'Prescribe')!.preds = 'prescribed′ = prescribed ∪ {p? ↦ drug?}';
+    const g = run(s, medication)['op-prescribe'].find((x) => x.text === 'Only for patients on the ward')!;
+    expect(g).toMatchObject({ achieved: true, via: 'inferred', evidence: { kind: 'proof' } });
+    const d = g.evidence?.kind === 'proof' ? g.evidence.derivation : null;
+    // not "p? ∈ patients [guaranteed by the invariant] ⊢ p? ∈ patients"
+    expect(d?.kind).toBe('chain');
+    if (d?.kind === 'chain') {
+      expect(d.start).toBe('dom prescribed′ ⊆ patients′');
+      expect(d.steps.at(-1)?.expr).toBe('p? ∈ patients');
+      expect(d.steps.map((x) => x.reason)).toContain('invariant before');
+    }
+  });
+});
+
 describe('the inverse relation as an encoding (Y ⇸ X for X ⇸ Y)', () => {
   const atc = byId('air-traffic-control');
   /** The tower with clearances per runway instead of per aircraft. */

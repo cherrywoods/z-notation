@@ -95,11 +95,15 @@ const cleanPool = (spec: SpecDoc, set: string): string[] => {
 };
 
 /**
- * The value pool of a given set: by the binding (the template's set it stands for, e.g.
- * Trains → TRAIN), else by its own name.
+ * The template set a given set stands for by the binding (Trains → TRAIN), if the set
+ * has no values of its own: values the student gave it (Types panel) always win.
  */
+const boundSet = (spec: SpecDoc, set: string, binding?: ExampleBinding): string | undefined =>
+  Array.isArray(spec.pools?.[set]) ? undefined : binding?.givens[set];
+
+/** The value pool of a given set: its own, else that of the template set it stands for. */
 const poolOf = (spec: SpecDoc, set: string, binding?: ExampleBinding): string[] => {
-  const ref = binding?.givens[set];
+  const ref = boundSet(spec, set, binding);
   const pool = ref !== undefined ? cleanPool(spec, ref) : [];
   return pool.length ? pool : cleanPool(spec, set);
 };
@@ -162,7 +166,10 @@ function buildUniverse(spec: SpecDoc, an: Analysis, seed: number, binding?: Exam
   }
   // infinite: by the binding too
   const inf = new Set(spec.infinite ?? []);
-  const infinite = an.givenSets.filter((n) => inf.has(n) || (binding?.givens[n] !== undefined && inf.has(binding.givens[n])));
+  const infinite = an.givenSets.filter((n) => {
+    const ref = boundSet(spec, n, binding);
+    return inf.has(n) || (ref !== undefined && inf.has(ref));
+  });
   // numbers of the spec and their neighbours are tried when ℕ / ℤ are listed
   const probes = [...new Set(specConstants(an).flatMap((n) => [n - 1, n, n + 1]))];
   return { u: { carriers, intMin: INT_MIN, intMax: INT_MAX, infinite, probes }, fixedRaw };

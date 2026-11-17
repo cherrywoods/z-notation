@@ -991,6 +991,9 @@ describe('templates', () => {
     expect(byName(rs.vars, 'guards')).toMatchObject({ fixed: true, text: '{S1 ↦ B2, S2 ↦ B3, S3 ↦ B4, S4 ↦ B3, S5 ↦ B2, S6 ↦ B1}' });
     // without the binding: generated names, no fixed data
     expect(exampleTypes(r, ra, 1).carriers[0].values[0]).toBe('trains1');
+    // values the student gave the set (Types panel) win over the bound pool
+    const own = { ...r, pools: { ...r.pools, Trains: ['T1', 'T2'] } };
+    expect(exampleTypes(own, ra, 1, rb).carriers[0].values).toEqual(['T1', 'T2']);
 
     // blood transfusion: compatible renamed, or written the other way round
     const b = fullSpec(blood);

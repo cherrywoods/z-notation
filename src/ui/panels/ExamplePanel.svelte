@@ -30,14 +30,16 @@
     const an = live.analysis;
     const spec = live.spec;
     if (!an || !spec || !generator) return null;
+    // the template's pools and fixed data for what the student's names stand for
+    const binding = live.binding ?? undefined;
     try {
-      if (schemaId === 'types') return generator.exampleTypes(spec, an, seed);
-      if (schemaId === 'state') return generator.exampleState(spec, an, seed);
-      if (schemaId === 'init') return generator.exampleInit(spec, an, seed);
+      if (schemaId === 'types') return generator.exampleTypes(spec, an, seed, binding);
+      if (schemaId === 'state') return generator.exampleState(spec, an, seed, { binding });
+      if (schemaId === 'init') return generator.exampleInit(spec, an, seed, { binding });
       // operations run on the State step's example state (its seed changes only there)
-      const st = generator.exampleState(spec, an, live.seedFor('state'));
+      const st = generator.exampleState(spec, an, live.seedFor('state'), { binding });
       const before = st.ok ? Object.fromEntries(st.vars.map((v) => [v.name, v.value])) : undefined;
-      return generator.exampleOperation(spec, an, schemaId, seed, mode, { before });
+      return generator.exampleOperation(spec, an, schemaId, seed, mode, { before, binding });
     } catch (e) {
       console.error('[example]', e);
       return null;

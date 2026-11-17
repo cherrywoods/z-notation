@@ -3,7 +3,7 @@
 // goals.ts across requests.
 //
 //   const runner = new GoalRunner();
-//   runner.check({ spec, reference, goals }, an).then((byStep) => …);   // null: outdated
+//   runner.check({ spec, reference, goals }, an).then((r) => …);   // r: { byStep, binding }, or null: outdated
 //
 // Only the latest request counts. One check runs at a time; a request that arrives
 // meanwhile waits (a newer one replaces it) and the running check's result is dropped.
@@ -124,7 +124,7 @@ export class GoalRunner {
       p.resolve(null); // outdated
       this.#start(next);
     } else if ('error' in reply) p.reject(new Error(reply.error));
-    else p.resolve(reply.byStep);
+    else p.resolve({ byStep: reply.byStep, binding: reply.binding });
   }
 
   /** The worker failed (e.g. it could not load): check the newest request here from now on. */

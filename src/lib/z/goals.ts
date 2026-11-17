@@ -2,8 +2,8 @@
 // status dot turns green once the student's spec achieves them. Goals are written with
 // the names of the template's reference spec and checked independently of names:
 //
-//   given  the student declared a given set with that name (case-insensitive, a
-//          trailing S ignored)
+//   given  the reference's given set is matched to one of the student's (by how the
+//          sets are used, see below; by name only when nothing uses them yet)
 //   var    the reference variable(s) can be matched to student variables of the same
 //          type (state variables; inputs ? and outputs ! of the operation)
 //   holds  under that matching, in this order:
@@ -16,18 +16,30 @@
 //          Achieved goals are 'stated' if the step's own content ensures them (own lines,
 //          declarations, Ξ), else 'inferred' (the invariant or the frame convention).
 //
-// The matching is one injective, type-preserving map for the state variables of the
-// whole spec and one per operation for its inputs and outputs, chosen to achieve the
-// most goals (ties: identical types first, then other encodings, then inverses; then
-// declaration order). Other encodings of the same information also match: a relation
-// X ↔ Y and a function to sets X → ℙ Y (or X ⇸ ℙ Y), and a relation and its inverse
-// (X ↔ Y / X ⇸ Y and Y ↔ X / Y ⇸ X). The student's values are converted to the
-// reference's encoding before the reference predicate is evaluated on them. If the
-// reference declares a function (⇸, →) and the student's encoding does not guarantee
-// it (a relation, the inverse, a function to sets), the reference declaration must hold
-// in every example and survive a targeted search for a counterexample ("an aircraft
-// cleared for two runways"); otherwise the variable's goal and the goals that apply the
-// function are not achieved, with that counterexample.
+// The matching: a bijection between the given sets and one injective, type-preserving
+// map for the state variables of the whole spec (reference variables may stay
+// unmatched), chosen by the State goals alone (most achieved; ties: more similar names,
+// then identical types before other encodings before inverses, then declaration order),
+// so that operations cannot pull same-typed variables their way. Each operation then
+// gets the input/output matching achieving most of its goals. Other encodings of the
+// same information also match: a relation X ↔ Y and a function to sets X → ℙ Y (or
+// X ⇸ ℙ Y); a relation and its inverse (also X ↔ X read the other way round); numbers
+// negated (a limit as the lowest balance for an overdraft). The student's values are
+// converted to the reference's encoding before the reference predicate is evaluated on
+// them. If the reference declares a function (⇸, →) and the student's encoding does not
+// guarantee it, the reference declaration must hold in every example and survive a
+// targeted search for a counterexample; otherwise the goals that apply the function are
+// not achieved, with that counterexample. A var goal also needs the student's
+// declaration to admit the reference's values (several allergies per patient). In
+// "unchanged" goals (v′ = v ∧ …) unmatched variables are left out.
+//
+// Automatic goals, after the template's: "Allows every state the requirements allow"
+// (State) and "Runs whenever it should" (each operation), checked the other way round:
+// on the reference's examples, read in the student's encoding.
+//
+// Counterexamples are shrunk (set elements dropped, numbers nearer 0) while they stay
+// valid and still break the goal. The matching also tells the generator which template
+// pools and fixed data the student's sets and variables take (exampleBinding).
 //
 // Determinism: all searches count work instead of milliseconds (gen/clock), so the
 // verdicts are the same on every machine and under any load.

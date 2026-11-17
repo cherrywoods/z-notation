@@ -176,8 +176,20 @@ The schema boxes show only generic prompts (State: "Add state variables" / "Add
 invariants"; operations: "Import the state", "Add inputs and outputs" / "Add
 preconditions", "Add postconditions"; Init: "Import the state" / "Add initial values").
 The system-specific guidance is a short list of **goals** below the step's top prompt.
-Each goal has a status dot that turns green automatically once the student's spec
-achieves it. Goals are checked **independently of variable names**.
+Each goal has a status mark that updates automatically. Goals are checked
+**independently of names** (variables and given sets).
+
+Marks (`src/ui/views/GoalList.svelte`):
+
+* green check: the step's own lines say it;
+* blue check: not written in this step, but it follows (from the invariant or the frame
+  convention);
+* hollow check: it held in every example tried, but it isn't proven;
+* grey ring: not yet.
+
+Hovering (after the usual help delay) or clicking shows why: the derivation, the
+examples note, or a small counterexample. Every open goal also says "This goal
+recognition is not perfect :) Your solution might be just fine." (lecturer's wording).
 
 Template format (`templates/<id>.json`, top level):
 
@@ -200,17 +212,37 @@ Template format (`templates/<id>.json`, top level):
 ```
 
 Checks are written with the names of the template's reference spec (its full, hidden
-lines). Semantics:
+lines). The checker is `src/lib/z/goals.ts`; it runs in a Web Worker
+(`src/lib/spec/goals.worker.ts`). Semantics:
 
-* `given`: the student declared a given set with that name (case-insensitive, a
-  trailing S ignored).
-* `var`: the reference variable(s) can be matched to student variables of the same
-  type (state variables, inputs `?`, outputs `!`). Reference variables are matched to
-  student variables by type only (given sets matched by name as above), with one
-  injective mapping per spec chosen to achieve the most goals; ties keep declaration
-  order. Names never matter.
-* `holds`: under that mapping, the predicate holds in every example the student's spec
-  allows: sampled valid states (state goals), initial states (init), or operation runs
-  (operation goals; values the spec leaves open are tested with their alternatives too).
-  At least one example must exist. This is a bounded check (small example universes),
-  which is fine for a progress indicator.
+* **Matching.** Given sets are matched to the student's by how they are used (all
+  bijections are tried, similar names first). Reference variables are matched to
+  student variables by type, through an encoding where needed: identical types, other
+  encodings (e.g. `X ⇸ ℙ Y` for `X ↔ Y`), inverse relations (`Y ↔ X`, also for one
+  type), and negated numbers (`limit = -overdraft`). A reference variable may stay
+  unmatched. The state matching is chosen by the State goals alone (ties: name
+  similarity, then the simpler encoding); operations only choose their inputs and
+  outputs. If an encoding doesn't guarantee the reference declaration (a relation for
+  a ⇸), the declaration is checked against the student's examples.
+* `given`: a given set is matched to the reference one.
+* `var`: the reference variable(s) are matched, and the student's declaration admits
+  the reference's valid values (`PATIENT ⇸ DRUG` can't hold two allergies of one
+  patient). If another goal of the step states the missing property (e.g. "An
+  aircraft is cleared for at most one runway"), only that goal fails.
+* `holds`: proof first (the inference engine, from the step's lines, the invariant and
+  the frame convention); else a counterexample (sampled examples, then a targeted
+  search); else achieved on examples (hollow mark). Searches count work, not
+  milliseconds (`gen/clock.ts`), so verdicts are the same on every machine.
+  "Unchanged" goals leave out reference variables the student has no counterpart for.
+* **Automatic goals**, appended after the template's goals, catch specs that are
+  stricter than the requirements: State "Allows every state the requirements allow"
+  (every valid reference state satisfies the student's invariant) and, per operation,
+  "Runs whenever it should" (wherever the reference operation applies, the student's
+  does too).
+* The matching also gives an **example binding** (`exampleBinding`): renamed given sets
+  get the template's value pools, and matched variables its fixed data (an inverse
+  reads the table the other way round).
+
+Deliberately not checked: alternative models that change the data (a separate `stock`
+set in Blood Transfusion, total functions in Bank); declarations with state variables
+(`t? : dom at`) are rejected with a rewrite hint.

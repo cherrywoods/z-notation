@@ -256,7 +256,7 @@
     top: calc(100% + 4px);
     left: 23px;
     width: max-content;
-    max-width: min(440px, calc(100vw - 48px));
+    max-width: min(620px, calc(100vw - 48px));
     background: var(--bg);
     color: var(--ui-fg-strong);
     border: 1px solid var(--ui-border);

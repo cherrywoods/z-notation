@@ -5,6 +5,7 @@
   import ZText from '../z/ZText.svelte';
   import { givenNames } from '../../lib/spec/helpers';
   import { store } from '../../lib/spec/store.svelte';
+  import { live } from '../../lib/spec/live.svelte';
   import type { SpecDoc } from '../../lib/spec/model';
 
   let { spec }: { spec: SpecDoc } = $props();
@@ -13,9 +14,21 @@
 
   const names = $derived(givenNames(doc.given));
 
-  /** Example values of a given set: its pool, or name1, name2, … */
-  const poolOf = (name: string) => doc.pools[name] ?? [1, 2, 3, 4, 5].map((i) => `${name.toLowerCase()}${i}`);
-  const isInfinite = (name: string) => (doc.infinite ?? []).includes(name);
+  /**
+   * The template set a set stands for (Trains → TRAIN, see live.binding), if the set has
+   * no values of its own: the examples then use that set's values, so they are shown.
+   */
+  const boundTo = (name: string) => {
+    const ref = doc.pools[name] ? undefined : live.binding?.givens[name];
+    return ref !== undefined && doc.pools[ref] ? ref : undefined;
+  };
+  /** Example values of a given set: its pool, the bound template pool, or name1, name2, … */
+  const poolOf = (name: string) => doc.pools[name] ?? doc.pools[boundTo(name) ?? ''] ?? [1, 2, 3, 4, 5].map((i) => `${name.toLowerCase()}${i}`);
+  const isInfinite = (name: string) => {
+    const inf = doc.infinite ?? [];
+    const ref = boundTo(name);
+    return inf.includes(name) || (ref !== undefined && inf.includes(ref));
+  };
 
   function update(name: string, values: string[], infinite: boolean) {
     doc.pools[name] = values;

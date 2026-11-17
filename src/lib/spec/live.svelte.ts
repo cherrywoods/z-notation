@@ -2,7 +2,7 @@
 // inference results. Recomputed (debounced) whenever the spec changes.
 
 import { analyseSpec, type Analysis } from '../z/index';
-import type { InferenceResult } from '../z/results';
+import type { ExampleBinding, InferenceResult } from '../z/results';
 import { inference } from './engine';
 import type { SectionPart, SpecDoc, ZDiagnostic } from './model';
 import { store } from './store.svelte';
@@ -34,13 +34,21 @@ class Live {
   inferred = $state.raw<InferenceResult | null>(null);
   /** Goal results of the analysed spec by step id (null: not checked yet). */
   goals = $state.raw<{ topicId: string; byStep: Record<string, GoalStatus[]> } | null>(null);
+  /**
+   * Which template given sets and variables the student's stand for (from the goal
+   * check's matching), so that examples use the template's pools and fixed data. Pass it
+   * to the generator; null (until the first goal check, own topic): go by names. Replaced
+   * only when it changes, so examples do not switch worlds on every keystroke.
+   */
+  binding = $state.raw<ExampleBinding | null>(null);
+  #bindingJson = '';
 
   /**
    * Example seeds per step ('state', 'init', op ids). The example world builds up step
    * by step: carriers come from the Types step, the state example from the State step
    * (operations run on it), and a seed changes only when its own step regenerates.
-   * Seeds and modes belong to the open doc: another topic or a reset starts afresh, and
-   * a removed step forgets its own (a re-added Operation3 gets the same id).
+   * Seeds, modes and the binding belong to the open doc: another topic or a reset starts
+   * afresh, and a removed step forgets its own (a re-added Operation3 gets the same id).
    */
   seeds = $state<Record<string, number>>({});
   /** Example mode per operation ('applicable' or the 'blocked' case). */
@@ -50,6 +58,8 @@ class Live {
     if (!ids) {
       this.seeds = {};
       this.modes = {};
+      this.binding = null;
+      this.#bindingJson = '';
       return;
     }
     for (const id of ids) {
@@ -132,8 +142,14 @@ class Live {
     this.#cancelGoals = idle(() => {
       if (run !== this.#goalRun) return;
       this.#goalRunner.check({ spec, reference, goals }, an).then(
-        (byStep) => {
-          if (byStep && run === this.#goalRun) this.goals = { topicId: spec.topicId, byStep };
+        (r) => {
+          if (!r || run !== this.#goalRun || store.current?.topicId !== spec.topicId) return;
+          this.goals = { topicId: spec.topicId, byStep: r.byStep };
+          const json = JSON.stringify(r.binding);
+          if (json !== this.#bindingJson) {
+            this.#bindingJson = json;
+            this.binding = r.binding;
+          }
         },
         (e) => console.error('[live] goal check failed', e),
       );

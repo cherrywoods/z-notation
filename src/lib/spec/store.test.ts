@@ -218,8 +218,10 @@ describe('example seeds and modes', () => {
     store.openTopic('bank-account');
     expect(live.modes['op-x']).toBe('blocked');
     expect(live.seedFor('state')).toBe(seed);
+    live.binding = { givens: { Patients: 'PATIENT' }, vars: {} };
     store.openTopic('medication');
     expect(live.modes['op-x']).toBeUndefined();
     expect(live.seeds.state).toBeUndefined();
+    expect(live.binding).toBeNull();
   });
 });

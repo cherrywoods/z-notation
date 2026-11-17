@@ -26,7 +26,8 @@ class FakeWorker {
       return;
     }
     setTimeout(() => {
-      if (!this.terminated) this.onmessage?.({ data: { id: req.id, byStep: { t: [{ text: req.spec.title, achieved: true }] } } });
+      if (!this.terminated)
+        this.onmessage?.({ data: { id: req.id, byStep: { t: [{ text: req.spec.title, achieved: true }] }, binding: { givens: {}, vars: {} } } });
     }, FakeWorker.delay);
   }
   terminate() {
@@ -39,7 +40,7 @@ const job = (title: string): GoalJob => {
   spec.title = title;
   return { spec, reference: referenceSpecOf('medication')!, goals: goalsOf('medication') as TemplateGoals };
 };
-const titleOf = (r: Record<string, { text: string }[]> | null) => r?.t?.[0]?.text ?? null;
+const titleOf = (r: { byStep: Record<string, { text: string }[]> } | null) => r?.byStep.t?.[0]?.text ?? null;
 
 describe('GoalRunner with a worker', () => {
   beforeEach(() => {
@@ -109,6 +110,17 @@ describe('GoalRunner without Worker', () => {
     const j = job('Medication Prescribing');
     const r = await new GoalRunner().check(j);
     expect(r).toEqual(runGoalJob(j));
-    expect(Object.keys(r!)).toEqual(expect.arrayContaining(['types', 'state']));
+    expect(Object.keys(r!.byStep)).toEqual(expect.arrayContaining(['types', 'state']));
+  });
+
+  it('works out the example binding with the goals (railway: Trains, Blocks, Signals)', async () => {
+    const spec = createSpec('railway-interlocking');
+    const ref = referenceSpecOf('railway-interlocking')!;
+    const rename = (t: string) => t.replace(/\bTRAIN\b/g, 'Trains').replace(/\bBLOCK\b/g, 'Blocks').replace(/\bSIGNAL\b/g, 'Signals');
+    spec.given = rename(ref.given);
+    spec.state.decls = rename(ref.state.decls);
+    spec.state.preds = rename(ref.state.preds);
+    const r = await new GoalRunner().check({ spec, reference: ref, goals: goalsOf('railway-interlocking') as TemplateGoals });
+    expect(r!.binding.givens).toMatchObject({ Trains: 'TRAIN', Blocks: 'BLOCK', Signals: 'SIGNAL' });
   });
 });
